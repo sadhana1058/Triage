@@ -1,0 +1,30 @@
+google-generativeai==0.8.3          # Gemini 2.0 Flash — generation + query rewrite
+# ── Vector DB ────────────────────────────────────────────────────
+qdrant-client==1.9.1                # local persistent mode (no Docker needed)
+
+
+# ── Embeddings + Re-ranking (both run fully local, zero API cost) ─
+sentence-transformers==3.0.1        # all-MiniLM-L6-v2 (bi-encoder)
+                                    # ms-marco-MiniLM-L-6-v2 (cross-encoder)
+torch==2.3.1                        # required by sentence-transformers
+                                    # CPU-only is fine for this corpus size
+transformers==4.41.2                # HuggingFace model loading
+
+
+# ── Data handling ────────────────────────────────────────────────
+pandas==2.2.2                       # read/write CSV files
+PyYAML==6.0.1                       # parse frontmatter from .md files
+
+
+# ── CLI ──────────────────────────────────────────────────────────
+typer==0.12.3                       # `python main.py run` / `python main.py eval`
+rich==13.7.1                        # coloured terminal output + progress bars
+
+
+# ── Evaluation metrics ───────────────────────────────────────────
+scikit-learn==1.5.0                 # F1 score, confusion matrix
+rouge-score==0.1.2                  # ROUGE-L for response quality
+
+
+# ── Environment ──────────────────────────────────────────────────
+python-dotenv==1.0.1                # load GEMINI_API_KEY from .env file
