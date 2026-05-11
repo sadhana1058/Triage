@@ -250,16 +250,6 @@ def pre_flight(
     Returns:
         None  → all checks passed, safe to continue pipeline
         dict  → guardrail fired, return this as the ticket output directly
-
-    Why return None for "pass"?
-        Pythonic pattern: None = no problem found.
-        The caller checks: `result = pre_flight(...); if result: return result`
-        Clean and readable.
-
-    Interview talking point:
-        "Pre-flight runs in microseconds — pure string matching,
-         no model calls. We want to reject garbage tickets before
-         spending any compute on them."
     """
     combined = f"{issue} {subject}".strip()
 
@@ -331,7 +321,6 @@ def is_hard_escalation(
         Reliability: LLMs can be confused or bypassed. Exact string matching cannot.
         Auditability: every escalation decision is traceable to a specific keyword.
 
-    Interview talking point:
         "For safety-critical routing decisions I prefer deterministic rules
          over probabilistic models. The cost of a missed fraud escalation
          is much higher than the cost of over-escalating an edge case."
