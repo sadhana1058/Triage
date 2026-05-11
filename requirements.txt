@@ -1,14 +1,32 @@
+# ─────────────────────────────────────────────────────────────────
+# HackerRank Orchestrate — Python dependencies
+# Python 3.10+ recommended
+#
+# Setup:
+#   python -m venv venv
+#   source venv/bin/activate        # Windows: venv\Scripts\activate
+#   pip install -r requirements.txt
+# ─────────────────────────────────────────────────────────────────
+
+
+# ── LLM — Gemini ─────────────────────────────────────────────────
 google-generativeai==0.8.3          # Gemini 2.0 Flash — generation + query rewrite
+
+
 # ── Vector DB ────────────────────────────────────────────────────
 qdrant-client==1.9.1                # local persistent mode (no Docker needed)
 
 
-# ── Embeddings + Re-ranking (both run fully local, zero API cost) ─
+# ── Embeddings + Re-ranking (fully local, zero API cost) ─────────
 sentence-transformers==3.0.1        # all-MiniLM-L6-v2 (bi-encoder)
                                     # ms-marco-MiniLM-L-6-v2 (cross-encoder)
-torch==2.3.1                        # required by sentence-transformers
-                                    # CPU-only is fine for this corpus size
+torch==2.3.1                        # required by sentence-transformers (CPU-only fine)
 transformers==4.41.2                # HuggingFace model loading
+
+
+# ── Sparse search ─────────────────────────────────────────────────
+rank-bm25==0.2.2                    # BM25 IDF weights → sparse vectors
+                                    # pure Python, no HuggingFace needed
 
 
 # ── Data handling ────────────────────────────────────────────────

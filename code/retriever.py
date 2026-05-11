@@ -2,26 +2,35 @@
 retriever.py
 ============
 
-INDEX TIME  (runs once, persists to disk):
+HYBRID SEARCH — Dense + Sparse vectors, fused with RRF.
+
+  Dense  (all-MiniLM-L6-v2):   captures semantic meaning
+                                "sync users" matches "provision accounts"
+  Sparse (BM25 via rank_bm25):  captures exact keywords
+                                "SCIM", "OAuth", "cs_live_abcdefgh"
+  Fusion (RRF):                 combines rankings — no weight tuning needed
+
+INDEX TIME (runs once, persists to disk):
     774 .md files
     → parse frontmatter  (title, breadcrumbs, source_url, last_updated)
-    → markdown-aware chunking  (split at # headings, not blind char count)
-    → build context string  (title + breadcrumbs + section + chunk text)
-    → MiniLM embeds the context string  → 384-dim vector
-    → store vector + production payload in Qdrant
+    → markdown-aware chunking  (split at # headings)
+    → build context string  (title + breadcrumbs + section + text)
+    → MiniLM encodes context string → dense vector  (384 floats)
+    → BM25 encodes chunk text      → sparse vector  ({word_id: idf_score})
+    → both stored in one Qdrant point with production payload
 
-QUERY TIME  (runs per ticket):
+QUERY TIME (runs per ticket):
     query string + company
-    → MiniLM embeds query
-    → Qdrant: domain-filtered vector search → top-8 candidates
-    → cross-encoder re-ranks candidates  (reads query+chunk together)
-    → return ranked list to agent.py
+    → MiniLM encodes query        → dense query vector
+    → BM25 encodes query          → sparse query vector
+    → Qdrant RRF fusion search    → top-8 candidates
+    → cross-encoder re-ranks      → final ranked list
+    → return to agent.py          (same interface as before)
 
-WHY TWO THINGS ARE DIFFERENT:
-    What we EMBED  = context-rich string (title + breadcrumbs + section + text)
-                     → better vector, better retrieval accuracy
-    What we STORE  = clean chunk text only
-                     → goes into Gemini prompt without noise
+KEY DESIGN:
+    embed_text  ≠  stored text
+    We embed (title + breadcrumbs + section + chunk) for better retrieval.
+    We store only the clean chunk text for the Gemini prompt.
 """
 
 from __future__ import annotations
@@ -29,14 +38,21 @@ from __future__ import annotations
 import re
 import hashlib
 import time
+import pickle
 from pathlib import Path
 from typing import Optional
 
 import yaml
+import numpy as np
+from rank_bm25 import BM25Okapi
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
-    Distance, VectorParams, PointStruct,
+    Distance, VectorParams, SparseVectorParams, SparseIndexParams,
+    PointStruct, SparseVector,
     Filter, FieldCondition, MatchValue,
+    Prefetch, FusionQuery, Fusion,
+    NamedVector, NamedSparseVector,
 )
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
@@ -47,17 +63,21 @@ from sentence_transformers import SentenceTransformer, CrossEncoder
 
 DATA_ROOT        = Path(__file__).parent.parent / "data"
 QDRANT_PATH      = str(Path(__file__).parent.parent / "qdrant_db")
+BM25_CACHE_PATH  = Path(__file__).parent.parent / "qdrant_db" / "bm25_state.pkl"
 COLLECTION_NAME  = "support_corpus"
-EMBEDDING_DIM    = 384      # all-MiniLM-L6-v2 output dimension
+EMBEDDING_DIM    = 384        # all-MiniLM-L6-v2 output size
 
 # Chunking
-MIN_CHUNK_CHARS  = 60       # skip sections shorter than this (e.g. empty headings)
-MAX_CHUNK_CHARS  = 1200     # hard cap — split oversized sections at paragraph boundary
+MIN_CHUNK_CHARS  = 60         # skip tiny fragments
+MAX_CHUNK_CHARS  = 1200       # split oversized sections at paragraph boundary
 
 # Retrieval
-TOP_K            = 8        # candidates to pull from Qdrant before re-ranking
-BI_SCORE_FLOOR   = 0.25     # Qdrant drops results below this (lenient pre-filter)
-                             # The strict 0.55 guardrail is applied in agent.py
+TOP_K            = 8          # candidates before cross-encoder re-ranking
+BI_SCORE_FLOOR   = 0.20       # lenient Qdrant pre-filter (strict 0.55 in agent.py)
+
+# Qdrant vector names (used in hybrid search calls)
+DENSE_VEC   = "dense"
+SPARSE_VEC  = "sparse"
 
 # Domain mappings
 DOMAIN_FOLDER_MAP = {
@@ -66,34 +86,40 @@ DOMAIN_FOLDER_MAP = {
     "visa":       "visa",
 }
 
-# CSV company field → domain label used in Qdrant filter
-# None means no filter → search all domains
 COMPANY_TO_DOMAIN = {
     "HackerRank": "hackerrank",
     "Claude":     "claude",
     "Visa":       "visa",
-    "None":       None,
+    "None":       None,        # search all domains
+}
+
+# BM25 stopwords — common words with no discriminative value
+STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been",
+    "being", "have", "has", "had", "do", "does", "did", "will",
+    "would", "could", "should", "may", "might", "shall", "can",
+    "to", "of", "in", "for", "on", "with", "at", "by", "from",
+    "and", "or", "but", "not", "this", "that", "it", "its",
+    "i", "we", "you", "he", "she", "they", "my", "your", "our",
 }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODEL SINGLETONS
-# Load once on first call, reuse for all 56 tickets.
-# Loading MiniLM takes ~3s, cross-encoder ~5s.
+# MODEL SINGLETONS — load once, reuse for all tickets
 # ─────────────────────────────────────────────────────────────────────────────
 
 _biencoder:    Optional[SentenceTransformer] = None
 _crossencoder: Optional[CrossEncoder]        = None
+_bm25:         Optional[BM25Okapi]           = None   # built from full corpus at index time
+_vocab:        Optional[dict[str, int]]      = None   # word → integer index for sparse vectors
 
 
 def get_biencoder() -> SentenceTransformer:
     """
     Bi-encoder = all-MiniLM-L6-v2
-    Converts any text → 384-number vector.
-    Fast because query and documents are encoded independently.
-    Used at:
-        - index time: encode every chunk (runs once)
-        - query time: encode each ticket query (runs per ticket)
+    Text → 384-float dense vector.
+    Fast: query and docs encoded independently.
+    Used at index time (all chunks) and query time (each ticket).
     """
     global _biencoder
     if _biencoder is None:
@@ -106,8 +132,8 @@ def get_crossencoder() -> CrossEncoder:
     """
     Cross-encoder = ms-marco-MiniLM-L-6-v2
     Reads (query + chunk) TOGETHER → single relevance score.
-    Slower than bi-encoder but much more accurate.
-    Used only on top-8 Qdrant results (not all 774 chunks).
+    Slower than bi-encoder but far more accurate.
+    Only applied to top-8 Qdrant results, not all chunks.
     """
     global _crossencoder
     if _crossencoder is None:
@@ -116,97 +142,176 @@ def get_crossencoder() -> CrossEncoder:
     return _crossencoder
 
 
+def get_bm25_state() -> tuple[BM25Okapi, dict[str, int]]:
+    """
+    Returns (bm25_model, vocab) — loaded from cache if available.
+    Built over the full corpus at index time.
+    Vocab maps word → integer index (Qdrant sparse vectors need integer indices).
+    """
+    global _bm25, _vocab
+    if _bm25 is None or _vocab is None:
+        if BM25_CACHE_PATH.exists():
+            print("[retriever] Loading BM25 state from cache...")
+            with open(BM25_CACHE_PATH, "rb") as f:
+                state = pickle.load(f)
+            _bm25  = state["bm25"]
+            _vocab = state["vocab"]
+        else:
+            raise RuntimeError(
+                "BM25 state not found. Run build_index() first."
+            )
+    return _bm25, _vocab
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TOKENIZER (shared by BM25 at index time and query time)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def tokenize(text: str) -> list[str]:
+    """
+    Lowercase + extract alphanumeric tokens + remove stopwords.
+
+    Why this tokenizer?
+        - Lowercasing: "SCIM" and "scim" should match
+        - Alphanumeric only: strip punctuation that adds noise
+        - Stopwords removed: "the", "is", "of" add no discriminative value
+          and inflate sparse vector size
+        - Keep numbers: "2.0", "oauth2", "cs_live_abcdefgh" are meaningful
+
+    Example:
+        "Setting up SCIM 2.0 for SkillUp users"
+        → ["setting", "up", "scim", "2", "0", "skillup", "users"]
+        → after stopwords: ["setting", "scim", "2", "0", "skillup", "users"]
+    """
+    tokens = re.findall(r"\b[a-z0-9]+\b", text.lower())
+    return [t for t in tokens if t not in STOPWORDS and len(t) > 1]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SPARSE VECTOR BUILDER
+# Converts text → SparseVector using BM25 IDF weights
+# ─────────────────────────────────────────────────────────────────────────────
+
+def text_to_sparse(
+    text: str,
+    vocab: dict[str, int],
+    bm25:  BM25Okapi,
+) -> SparseVector:
+    """
+    Convert text to a Qdrant SparseVector using BM25 IDF weights.
+
+    What a sparse vector is:
+        A normal dense vector has a value at every position (384 floats).
+        A sparse vector only stores positions where the value is non-zero.
+        For a 30,000-word vocabulary, most documents use ~50-200 unique words,
+        so 99%+ of positions are zero — sparse format saves memory.
+
+    SparseVector format:
+        indices = [4821, 2034, 9103]   ← which vocab positions are non-zero
+        values  = [0.91, 0.76, 0.54]   ← BM25 IDF weight for each word
+
+    Why IDF as the weight?
+        IDF (Inverse Document Frequency) = log(N / df)
+        High IDF = word appears in few documents = very discriminative
+        Low IDF  = word appears in many documents = common, less useful
+        "SCIM" → high IDF (rare term, very specific)
+        "setting" → low IDF (appears in many docs)
+
+    Returns SparseVector(indices=[...], values=[...])
+    """
+    tokens  = tokenize(text)
+    seen    = set()
+    indices = []
+    values  = []
+
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+
+        if token in vocab and token in bm25.idf:
+            idf = float(bm25.idf[token])
+            if idf > 0:
+                indices.append(vocab[token])
+                values.append(idf)
+
+    return SparseVector(indices=indices, values=values)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FRONTMATTER PARSER
-# Each .md file starts with a YAML block between --- markers.
-# We extract structured metadata from it instead of treating it as text.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_frontmatter(raw: str) -> tuple[dict, str]:
     """
     Split a markdown file into (frontmatter_dict, body_text).
 
-    Frontmatter looks like:
+    Frontmatter is the YAML block between --- markers at the top of each file:
         ---
         title: "Setting Up SCIM for SkillUp"
         source_url: "https://support.hackerrank.com/articles/..."
-        last_updated_exact: "Mar 11, 2026"
         breadcrumbs:
           - "SkillUp"
           - "Integrations"
         ---
 
     Returns:
-        meta  = {"title": "...", "source_url": "...", "breadcrumbs": [...], ...}
-        body  = everything after the closing ---
+        meta = {"title": "...", "breadcrumbs": [...], ...}
+        body = everything after the closing ---
 
-    If no frontmatter found, returns ({}, raw)
+    If no frontmatter, returns ({}, raw).
     """
-    # Match the opening --- ... closing --- block
     match = re.match(r"^---\n([\s\S]*?)\n---\n([\s\S]*)$", raw.strip())
     if not match:
         return {}, raw
-
     try:
         meta = yaml.safe_load(match.group(1)) or {}
     except yaml.YAMLError:
         meta = {}
-
-    body = match.group(2).strip()
-    return meta, body
+    return meta, match.group(2).strip()
 
 
 def extract_meta_fields(meta: dict, domain: str) -> dict:
     """
-    Normalize frontmatter fields across all three domains.
+    Normalize frontmatter across all three domains into one consistent schema.
 
-    Problem: each domain uses slightly different field names:
-        HackerRank: last_updated_exact, breadcrumbs, article_slug
-        Claude:     last_updated_iso,   breadcrumbs, article_id
-        Visa:       last_modified,      no breadcrumbs, description
+    Problem: each domain uses different field names:
+        HackerRank → last_updated_exact, breadcrumbs, article_slug
+        Claude     → last_updated_iso,   breadcrumbs, article_id
+        Visa       → last_modified,      no breadcrumbs, description
 
-    We normalize everything into a consistent set of fields.
-
-    Returns a clean dict with guaranteed keys (empty string if missing).
+    We map all of these to the same output keys so downstream code
+    never needs to know which domain a chunk came from.
     """
-    # Title — all domains have this
+    # Title
     title = meta.get("title", "").strip()
-    # Remove repeated words that appear in HackerRank titles
-    # e.g. "End an Interview Ending an Interview" → "End an Interview"
+    # Fix HackerRank duplicate titles: "End Interview Ending Interview" → "End Interview"
     title = re.sub(r"(.{20,})\s+\1", r"\1", title).strip()
 
-    # Source URL — the canonical public URL (cited in responses)
+    # Source URL (canonical public link, cited in responses)
     source_url = meta.get("source_url", meta.get("final_url", "")).strip()
 
-    # Breadcrumbs — navigation path, used to infer product_area
-    # e.g. ["SkillUp", "Integrations"] or ["Screen", "Managing Tests"]
+    # Breadcrumbs (navigation path → used to infer product_area)
     breadcrumbs = meta.get("breadcrumbs", [])
     if isinstance(breadcrumbs, str):
         breadcrumbs = [breadcrumbs]
 
-    # For Visa docs that have no breadcrumbs, infer from folder path
-    # We'll fill this from the filepath in chunk_document()
-
     # Subdomain = first breadcrumb (most specific product area)
     subdomain = breadcrumbs[0].lower().replace(" ", "_") if breadcrumbs else domain
 
-    # Last updated — normalize to ISO date string
+    # Last updated — normalize across formats
     last_updated = (
-        meta.get("last_updated_exact")        # HackerRank format
-        or meta.get("last_updated_iso")       # Claude format
-        or meta.get("last_modified")          # Visa format
+        meta.get("last_updated_exact")   # HackerRank
+        or meta.get("last_updated_iso")  # Claude
+        or meta.get("last_modified")     # Visa
         or ""
     )
-    # Keep only the date part (drop time component for cleanliness)
-    date_match = re.search(r"(\d{4}-\d{2}-\d{2}|\w+ \d+, \d{4})", str(last_updated))
+    date_match   = re.search(r"(\d{4}-\d{2}-\d{2}|\w+ \d+, \d{4})", str(last_updated))
     last_updated = date_match.group(1) if date_match else ""
 
-    # Doc ID — extracted from filename (e.g. "9005750838-setting-up-scim.md" → "9005750838")
-    # Filled in later by chunk_document() which has the filepath
-    doc_id = meta.get("article_slug", meta.get("article_id", "")).strip()
-
-    # Description — Visa docs have this, others don't
-    description = meta.get("description", "").strip()
+    # Doc ID — from frontmatter if available, else parsed from filename
+    doc_id      = str(meta.get("article_slug", meta.get("article_id", ""))).strip()
+    description = meta.get("description", "").strip()   # Visa docs only
 
     return {
         "title":        title,
@@ -221,52 +326,29 @@ def extract_meta_fields(meta: dict, domain: str) -> dict:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MARKDOWN-AWARE CHUNKER
-#
-# Instead of blindly splitting every 500 chars, we split at heading boundaries.
-# Each H1/H2/H3 section becomes its own chunk.
-#
-# Why this is better for support docs:
-#   - Each heading = one topic = one potential answer
-#   - Sections are already self-contained by the author
-#   - No sentence is ever split at a chunk boundary
+# Split at heading boundaries instead of blind character count.
+# Each H1/H2/H3 section = one chunk = one answerable topic.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def split_into_sections(body: str) -> list[tuple[str, str]]:
     """
-    Split markdown body into (heading, content) pairs at H1/H2/H3 boundaries.
+    Split markdown body into (heading, content) pairs at H1/H2/H3 headings.
 
-    Example input:
-        # Prerequisites
-        You need Azure AD configured.
+    Example:
+        "# Prerequisites\nYou need Azure AD.\n\n## Step 1\nGo to Settings."
+        → [("Prerequisites", "You need Azure AD."), ("Step 1", "Go to Settings.")]
 
-        ## Step 1 — Enable SCIM
-        Go to Settings > Integrations.
-
-        ## Step 2 — Add token
-        Copy the token from...
-
-    Example output:
-        [
-            ("Prerequisites",        "You need Azure AD configured."),
-            ("Step 1 — Enable SCIM", "Go to Settings > Integrations."),
-            ("Step 2 — Add token",   "Copy the token from..."),
-        ]
-
-    Content before the first heading is kept as section ("", content).
+    Content before the first heading → ("", content).
     """
-    # Split at any # heading (H1, H2, H3)
-    # re.split with a capture group keeps the delimiter in the result list
-    parts = re.split(r"\n(#{1,3} .+)\n", body)
-
+    parts    = re.split(r"\n(#{1,3} .+)\n", body)
     sections = []
-    # parts[0] = content before first heading (if any)
+
     if parts[0].strip():
         sections.append(("", parts[0].strip()))
 
-    # Remaining parts come in pairs: [heading, content, heading, content, ...]
     i = 1
     while i < len(parts) - 1:
-        heading = parts[i].lstrip("#").strip()   # "## Step 1" → "Step 1"
+        heading = parts[i].lstrip("#").strip()
         content = parts[i + 1].strip()
         if content:
             sections.append((heading, content))
@@ -275,22 +357,16 @@ def split_into_sections(body: str) -> list[tuple[str, str]]:
     return sections
 
 
-def split_oversized(section_text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
+def split_oversized(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
     """
-    If a section is too long (e.g. a huge list or table), split it at
-    paragraph boundaries (\n\n) rather than blindly at char count.
-
-    This preserves paragraph integrity even when sections are large.
-
-    Example: a 3000-char section with 5 paragraphs →
-        returns 3 chunks, each under max_chars, each ending at \n\n boundary.
+    If a section exceeds max_chars, split at paragraph boundaries (\n\n).
+    Preserves paragraph integrity — never cuts mid-sentence.
     """
-    if len(section_text) <= max_chars:
-        return [section_text]
+    if len(text) <= max_chars:
+        return [text]
 
-    paragraphs = section_text.split("\n\n")
-    chunks = []
-    current = ""
+    paragraphs = text.split("\n\n")
+    chunks, current = [], ""
 
     for para in paragraphs:
         if len(current) + len(para) + 2 <= max_chars:
@@ -303,162 +379,143 @@ def split_oversized(section_text: str, max_chars: int = MAX_CHUNK_CHARS) -> list
     if current:
         chunks.append(current)
 
-    return chunks if chunks else [section_text[:max_chars]]
+    return chunks or [text[:max_chars]]
 
 
 def chunk_document(
     raw_text: str,
     filepath: Path,
-    domain: str,
+    domain:   str,
 ) -> list[dict]:
     """
     Full pipeline for one markdown file:
         1. Parse frontmatter → extract metadata
-        2. Split body into heading sections
+        2. Split body at headings → sections
         3. Split oversized sections at paragraph boundaries
-        4. Build production payload for each chunk
-        5. Build context string for embedding (different from stored text)
+        4. For each chunk:
+             - build embed_text  (context-rich, for MiniLM)
+             - build payload     (clean, for Qdrant storage and Gemini)
 
-    Returns list of chunk dicts, each ready to become a Qdrant PointStruct.
+    Returns list of chunk dicts:
+        {
+            "id":         int (deterministic hash),
+            "embed_text": str (what MiniLM encodes),
+            "text":       str (what gets stored + sent to Gemini),
+            "payload":    dict (full production payload),
+        }
 
-    Each dict has:
-        embed_text   : context-rich string → what MiniLM encodes
-        payload      : clean production payload → stored in Qdrant
+    WHY embed_text ≠ stored text:
+        embed_text = "Document: SCIM Setup\nCategory: SkillUp > Integrations\n\nYou need Azure AD..."
+        stored     = "You need Azure AD..."
+
+        The vector carries full document context → better retrieval.
+        The stored text is clean → better Gemini prompt (no noise).
     """
     meta, body = parse_frontmatter(raw_text)
     fields     = extract_meta_fields(meta, domain)
 
-    # Extract doc_id from filename if not in frontmatter
-    # e.g. "9005750838-setting-up-scim-provisioning.md" → "9005750838"
-    stem = filepath.stem   # filename without extension
+    # Extract doc_id from filename if frontmatter doesn't have it
+    stem     = filepath.stem
     id_match = re.match(r"^(\d+)-", stem)
-    doc_id = fields["doc_id"] or (id_match.group(1) if id_match else stem)
+    doc_id   = fields["doc_id"] or (id_match.group(1) if id_match else stem)
 
-    # For Visa docs without breadcrumbs, infer from folder structure
-    # e.g. data/visa/support/small-business/fraud-protection.md
-    #      → breadcrumbs = ["Small Business", "Fraud Protection"]
+    # Visa docs have no breadcrumbs — infer from folder structure
+    # data/visa/support/small-business/fraud-protection.md
+    # → ["Small Business"]
     if not fields["breadcrumbs"] and domain == "visa":
-        rel_parts = filepath.relative_to(DATA_ROOT).parts
-        # Skip "visa", "support" → take remaining folder names
-        crumb_parts = [p.replace("-", " ").title() for p in rel_parts[2:-1]]
+        rel_parts           = filepath.relative_to(DATA_ROOT).parts
+        crumb_parts         = [p.replace("-", " ").title() for p in rel_parts[2:-1]]
         fields["breadcrumbs"] = crumb_parts
         fields["subdomain"]   = crumb_parts[0].lower().replace(" ", "_") if crumb_parts else "visa"
 
-    sections = split_into_sections(body)
-    chunks   = []
+    sections  = split_into_sections(body)
+    chunks    = []
     chunk_idx = 0
 
     for heading, content in sections:
-        # Split oversized sections at paragraph boundaries
-        sub_chunks = split_oversized(content)
-
-        for sub in sub_chunks:
+        for sub in split_oversized(content):
             if len(sub) < MIN_CHUNK_CHARS:
-                continue   # skip tiny fragments (empty sections, single lines)
+                continue
 
-            # ── Unique ID ───────────────────────────────────────────────────
-            # Deterministic: same file + same chunk index → same ID every run
-            # Qdrant requires int (or UUID) as point ID
+            # Deterministic integer ID (Qdrant requires int or UUID)
             raw_id   = f"{doc_id}::{chunk_idx}"
             chunk_id = int(hashlib.md5(raw_id.encode()).hexdigest(), 16) % (10 ** 12)
 
-            # ── Context string for EMBEDDING ────────────────────────────────
-            # This is what MiniLM encodes.
-            # We prepend document context so the vector "knows" where it came from.
-            # The title + breadcrumbs + section words enrich the semantic meaning
-            # of the chunk even when those words don't appear in the chunk text.
-            context_parts = []
+            # ── embed_text: context-rich, used by MiniLM ──────────────────
+            # Prepending title + breadcrumbs + section means the vector
+            # "knows" the document context even when those words aren't in
+            # the chunk text itself.
+            ctx = []
             if fields["title"]:
-                context_parts.append(f"Document: {fields['title']}")
+                ctx.append(f"Document: {fields['title']}")
             if fields["breadcrumbs"]:
-                context_parts.append(f"Category: {' > '.join(fields['breadcrumbs'])}")
+                ctx.append(f"Category: {' > '.join(fields['breadcrumbs'])}")
             if heading:
-                context_parts.append(f"Section: {heading}")
-            context_parts.append(f"Domain: {domain}")
-            context_parts.append("")         # blank line separator
-            context_parts.append(sub)        # actual chunk content
+                ctx.append(f"Section: {heading}")
+            ctx.append(f"Domain: {domain}")
+            ctx.append("")
+            ctx.append(sub)
+            embed_text = "\n".join(ctx)
 
-            embed_text = "\n".join(context_parts)
-
-            # ── Production payload for STORAGE ─────────────────────────────
-            # This is what gets stored in Qdrant and returned to agent.py.
-            # It does NOT include the context header — that was only for embedding.
+            # ── payload: production fields stored in Qdrant ───────────────
             payload = {
-                # ── Identity ───────────────────────────────────────────────
-                "doc_id":        doc_id,
-                "chunk_id":      raw_id,                  # "9005750838::2"
-                "chunk_idx":     chunk_idx,
-                "source":        str(filepath),           # local path for debugging
+                # Identity
+                "doc_id":       doc_id,
+                "chunk_id":     raw_id,           # "9005750838::2"
+                "chunk_idx":    chunk_idx,
+                "source":       str(filepath),
 
-                # ── Content ────────────────────────────────────────────────
-                "text":          sub,                     # clean chunk → sent to Gemini
-                "title":         fields["title"],         # doc title → shown in prompt header
-                "section":       heading,                 # H2/H3 heading → shown in prompt
-                "breadcrumbs":   fields["breadcrumbs"],   # ["SkillUp", "Integrations"]
-                "source_url":    fields["source_url"],    # cited in response
-                "description":   fields["description"],   # Visa docs have this
+                # Content (agent.py reads these to build Gemini prompt)
+                "text":         sub,              # clean chunk text
+                "title":        fields["title"],
+                "section":      heading,
+                "breadcrumbs":  fields["breadcrumbs"],
+                "source_url":   fields["source_url"],
+                "description":  fields["description"],
 
-                # ── Operational ────────────────────────────────────────────
-                "domain":        domain,                  # primary Qdrant filter key
-                "subdomain":     fields["subdomain"],     # "skillup", "screen", "interviews"
-                "last_updated":  fields["last_updated"],  # freshness signal
-                "language":      "en",                    # all docs are English
-                "chunk_length":  len(sub),                # char count of this chunk
+                # Operational (filtering, product_area, tracing)
+                "domain":       domain,
+                "subdomain":    fields["subdomain"],
+                "last_updated": fields["last_updated"],
+                "language":     "en",
+                "chunk_length": len(sub),
             }
 
             chunks.append({
                 "id":         chunk_id,
-                "embed_text": embed_text,
+                "embed_text": embed_text,   # → MiniLM → dense vector
+                "text":       sub,          # → BM25   → sparse vector (raw text, not embed_text)
                 "payload":    payload,
             })
-
             chunk_idx += 1
 
     return chunks
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONTEXT STRING BUILDER (for query time)
-# At query time we also want to prepend any known context to the query
-# before embedding — so the query vector matches the same "language" as chunks.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_query_embed_text(query: str, company: str) -> str:
-    """
-    Prepend domain context to the query before embedding.
-
-    Why:
-        Our chunk vectors were built with "Domain: hackerrank" prepended.
-        If the query vector has no domain context, there's a slight mismatch.
-        Adding domain context to the query brings them into the same space.
-
-    Example:
-        query   = "how do I sync users automatically"
-        company = "HackerRank"
-        output  = "Domain: HackerRank\n\nhow do I sync users automatically"
-    """
-    if company and company != "None":
-        return f"Domain: {company}\n\n{query}"
-    return query
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# INDEX TIME — build the Qdrant collection from the corpus
+# INDEX TIME
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_index(force_rebuild: bool = False) -> QdrantClient:
     """
-    Full indexing pipeline: read corpus → chunk → embed → store in Qdrant.
+    Full indexing pipeline.
+
+    Steps:
+        1. Walk all 774 .md files, chunk each one
+        2. Build BM25 model over all chunk texts → save to disk
+        3. Build vocab (word → int index) → save to disk
+        4. Create Qdrant collection with BOTH dense + sparse vector configs
+        5. For each chunk:
+             dense  = MiniLM.encode(embed_text)
+             sparse = BM25 IDF weights for words in chunk text
+        6. Upsert both vectors + payload into Qdrant
 
     force_rebuild=False (default):
-        If collection already exists, return client immediately.
-        Makes `python main.py run` instant on 2nd+ invocation.
-
+        Skip if collection already exists. Makes startup instant on run 2+.
     force_rebuild=True:
-        Deletes collection and rebuilds from scratch.
-        Use when corpus changes or chunking logic is updated.
+        Delete and rebuild. Use when corpus or chunking logic changes.
 
-    Returns a connected QdrantClient ready for searching.
+    Returns connected QdrantClient for query time.
     """
     client   = QdrantClient(path=QDRANT_PATH)
     existing = [c.name for c in client.get_collections().collections]
@@ -466,52 +523,107 @@ def build_index(force_rebuild: bool = False) -> QdrantClient:
     if COLLECTION_NAME in existing and not force_rebuild:
         count = client.get_collection(COLLECTION_NAME).points_count
         print(f"[retriever] Index exists ({count} points). Skipping rebuild.")
+        # Load BM25 state into memory for query time
+        get_bm25_state()
         return client
 
     if COLLECTION_NAME in existing:
-        print("[retriever] Deleting existing collection for rebuild...")
+        print("[retriever] Deleting collection for rebuild...")
         client.delete_collection(COLLECTION_NAME)
 
-    # Distance.COSINE:
-    #   similarity = 1.0 → vectors point in the same direction → very similar text
-    #   similarity = 0.0 → perpendicular → unrelated text
-    client.create_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
-    )
-    print(f"[retriever] Created collection '{COLLECTION_NAME}'")
-
-    model    = get_biencoder()
-    md_files = list(DATA_ROOT.rglob("*.md"))
+    # ── Step 1: Chunk all documents ──────────────────────────────────────────
+    md_files   = list(DATA_ROOT.rglob("*.md"))
     print(f"[retriever] Chunking {len(md_files)} markdown files...")
 
     all_chunks = []
     for filepath in md_files:
-        rel       = filepath.relative_to(DATA_ROOT)
-        domain    = DOMAIN_FOLDER_MAP.get(rel.parts[0].lower(), "unknown")
-        raw_text  = filepath.read_text(encoding="utf-8", errors="ignore")
-        chunks    = chunk_document(raw_text, filepath, domain)
-        all_chunks.extend(chunks)
+        rel      = filepath.relative_to(DATA_ROOT)
+        domain   = DOMAIN_FOLDER_MAP.get(rel.parts[0].lower(), "unknown")
+        raw_text = filepath.read_text(encoding="utf-8", errors="ignore")
+        all_chunks.extend(chunk_document(raw_text, filepath, domain))
 
-    print(f"[retriever] Total chunks to embed: {len(all_chunks)}")
+    print(f"[retriever] Total chunks: {len(all_chunks)}")
 
-    # Batch embedding — MiniLM handles batches efficiently
-    BATCH = 64
+    # ── Step 2: Build BM25 model over all chunk texts ────────────────────────
+    # BM25 needs to see ALL documents to compute IDF correctly.
+    # IDF = log(total_docs / docs_containing_word)
+    # A word appearing in only 2 of 5000 chunks → high IDF → very discriminative
+    # A word appearing in 4000 of 5000 chunks → low IDF → common, less useful
+    print("[retriever] Building BM25 model over full corpus...")
+    tokenized_corpus = [tokenize(c["text"]) for c in all_chunks]
+    bm25             = BM25Okapi(tokenized_corpus)
+
+    # ── Step 3: Build vocab ──────────────────────────────────────────────────
+    # Qdrant sparse vectors need integer indices, not strings.
+    # We build a global word → int mapping and save it.
+    vocab: dict[str, int] = {}
+    for tokens in tokenized_corpus:
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = len(vocab)
+
+    print(f"[retriever] Vocabulary size: {len(vocab)} unique tokens")
+
+    # Save BM25 + vocab to disk so query time can load without rebuilding
+    BM25_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(BM25_CACHE_PATH, "wb") as f:
+        pickle.dump({"bm25": bm25, "vocab": vocab}, f)
+    print(f"[retriever] BM25 state saved to {BM25_CACHE_PATH}")
+
+    # Cache in memory
+    global _bm25, _vocab
+    _bm25, _vocab = bm25, vocab
+
+    # ── Step 4: Create Qdrant collection with hybrid vector config ───────────
+    # Named vectors: "dense" for MiniLM, "sparse" for BM25
+    # This is different from single-vector collections.
+    client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config={
+            DENSE_VEC: VectorParams(
+                size=EMBEDDING_DIM,
+                distance=Distance.COSINE,
+            ),
+        },
+        sparse_vectors_config={
+            SPARSE_VEC: SparseVectorParams(
+                index=SparseIndexParams(on_disk=False),  # keep in RAM for speed
+            ),
+        },
+    )
+    print(f"[retriever] Created hybrid collection '{COLLECTION_NAME}'")
+
+    # ── Step 5 + 6: Embed + upsert in batches ───────────────────────────────
+    biencoder      = get_biencoder()
+    BATCH          = 64
     total_upserted = 0
 
     for i in range(0, len(all_chunks), BATCH):
-        batch      = all_chunks[i : i + BATCH]
-        # Embed the context-rich string (not the stored text)
-        embed_texts = [c["embed_text"] for c in batch]
-        vectors    = model.encode(embed_texts, show_progress_bar=False).tolist()
+        batch = all_chunks[i : i + BATCH]
 
+        # Dense vectors: MiniLM encodes the context-rich embed_text
+        dense_vecs = biencoder.encode(
+            [c["embed_text"] for c in batch],
+            show_progress_bar=False,
+        ).tolist()
+
+        # Sparse vectors: BM25 IDF weights for words in clean chunk text
+        sparse_vecs = [
+            text_to_sparse(c["text"], vocab, bm25)
+            for c in batch
+        ]
+
+        # Build PointStructs with NAMED vectors
         points = [
             PointStruct(
                 id      = c["id"],
-                vector  = v,
-                payload = c["payload"],   # production payload stored, not embed_text
+                vector  = {
+                    DENSE_VEC:  dv,    # list of 384 floats
+                    SPARSE_VEC: sv,    # SparseVector(indices, values)
+                },
+                payload = c["payload"],
             )
-            for c, v in zip(batch, vectors)
+            for c, dv, sv in zip(batch, dense_vecs, sparse_vecs)
         ]
 
         client.upsert(collection_name=COLLECTION_NAME, points=points)
@@ -526,8 +638,22 @@ def build_index(force_rebuild: bool = False) -> QdrantClient:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# QUERY TIME — search Qdrant + cross-encoder re-rank
+# QUERY TIME
 # ─────────────────────────────────────────────────────────────────────────────
+
+def build_query_embed_text(query: str, company: str) -> str:
+    """
+    Prepend domain context to query before dense embedding.
+
+    Why:
+        Chunk vectors were built with "Domain: hackerrank" prepended.
+        Prepending the same context to the query brings it into the same
+        semantic space → better cosine similarity scores.
+    """
+    if company and company != "None":
+        return f"Domain: {company}\n\n{query}"
+    return query
+
 
 def retrieve(
     query:   str,
@@ -536,102 +662,112 @@ def retrieve(
     top_k:   int = TOP_K,
 ) -> list[dict]:
     """
-    Find the most relevant corpus chunks for a support ticket query.
+    Hybrid search: dense + sparse → RRF fusion → cross-encoder re-rank.
 
     Pipeline:
-        1. Prepend domain context to query (matches the chunk embedding space)
-        2. Embed with bi-encoder (MiniLM) → query vector
-        3. Qdrant search filtered by domain → top_k candidates
-        4. Cross-encoder re-ranks candidates (reads query + chunk together)
-        5. Sort by cross_score, return
+        1. Build dense query vector  (MiniLM on context-prepended query)
+        2. Build sparse query vector (BM25 IDF weights for query tokens)
+        3. Qdrant prefetch: run dense search → top_k candidates
+        4. Qdrant prefetch: run sparse search → top_k candidates
+        5. RRF fusion: merge both candidate lists by rank position
+        6. Apply domain filter (HackerRank tickets never search Visa docs)
+        7. Cross-encoder re-ranks the fused top_k results
+        8. Return sorted list, best chunk first
 
-    Args:
-        query:   Support ticket text (may be rewritten by agent before calling)
-        company: CSV company field — "HackerRank", "Claude", "Visa", or "None"
-        client:  Connected QdrantClient (from build_index())
-        top_k:   Candidates to retrieve before re-ranking
+    WHY RRF (Reciprocal Rank Fusion):
+        Dense score = 0.91 (cosine, 0-1 scale)
+        Sparse score = 12.4 (BM25, unbounded scale)
+        You CANNOT add these directly — they're on different scales.
+        RRF works on RANK POSITIONS, not raw scores:
+            score = 1/(rank_dense + 60) + 1/(rank_sparse + 60)
+        Scale doesn't matter. No weight tuning needed.
+        60 is a standard constant that prevents top-rank dominance.
 
-    Returns list of result dicts sorted by cross_score (best first):
-        [
-          {
-            "text":        "...",            ← sent to Gemini as context
-            "title":       "...",            ← shown as context header in prompt
-            "section":     "Prerequisites", ← shown in prompt
-            "breadcrumbs": ["SkillUp", ...],← used for product_area
-            "source_url":  "https://...",   ← cited in response
-            "domain":      "hackerrank",
-            "subdomain":   "skillup",
-            "last_updated":"2026-03-11",
-            "source":      "data/...",      ← for trace log
-            "bi_score":    0.78,            ← Qdrant cosine similarity
-            "cross_score": 0.91,            ← cross-encoder score (sort key)
-          },
-          ...
-        ]
+    Returns list of dicts sorted by cross_score (best first).
+    Same interface as before — agent.py doesn't know about hybrid internals.
     """
     t0 = time.time()
 
-    # Step 1 — resolve domain filter
-    domain = COMPANY_TO_DOMAIN.get(company)   # None = no filter = search all domains
+    bm25, vocab = get_bm25_state()
+    domain      = COMPANY_TO_DOMAIN.get(company)
 
-    # Step 2 — embed query with domain context prepended
-    query_embed = build_query_embed_text(query, company)
-    query_vector = get_biencoder().encode(query_embed).tolist()
+    # Step 1 — dense query vector
+    query_embed  = build_query_embed_text(query, company)
+    dense_qvec   = get_biencoder().encode(query_embed).tolist()
 
-    # Step 3 — Qdrant search with optional domain filter
+    # Step 2 — sparse query vector
+    sparse_qvec  = text_to_sparse(query, vocab, bm25)
+
+    # Step 3+4+5 — Qdrant hybrid search with RRF fusion
+    # Prefetch = run each search independently first, then fuse.
+    # This is Qdrant's native hybrid search pattern.
     qdrant_filter = None
     if domain:
-        # Only return chunks where payload.domain == domain
-        # This is the domain routing step — HackerRank tickets never touch Visa docs
         qdrant_filter = Filter(
             must=[FieldCondition(key="domain", match=MatchValue(value=domain))]
         )
 
-    results = client.search(
-        collection_name  = COLLECTION_NAME,
-        query_vector     = query_vector,
-        query_filter     = qdrant_filter,
-        limit            = top_k,
-        score_threshold  = BI_SCORE_FLOOR,   # lenient pre-filter
-        with_payload     = True,
-    )
+    results = client.query_points(
+        collection_name = COLLECTION_NAME,
+        prefetch        = [
+            # Dense arm: semantic search
+            Prefetch(
+                query        = NamedVector(name=DENSE_VEC, vector=dense_qvec),
+                filter       = qdrant_filter,
+                limit        = top_k,
+                score_threshold = BI_SCORE_FLOOR,
+            ),
+            # Sparse arm: keyword search
+            Prefetch(
+                query        = NamedSparseVector(name=SPARSE_VEC, vector=sparse_qvec),
+                filter       = qdrant_filter,
+                limit        = top_k,
+            ),
+        ],
+        # RRF fusion: merge the two candidate lists by rank position
+        query  = FusionQuery(fusion=Fusion.RRF),
+        limit  = top_k,
+        with_payload = True,
+    ).points
 
     if not results:
         print(f"[retriever] ⚠ Zero results for: '{query[:70]}'")
         return []
 
-    # Step 4 — cross-encoder re-ranking
-    # Cross-encoder reads (query, chunk_text) TOGETHER — not the embed_text
-    # We use the clean stored text here, not the context string
+    # Step 6 — cross-encoder re-ranking
+    # Cross-encoder reads (query, clean_chunk_text) together
+    # → much more accurate relevance score than either bi-encoder gives
     pairs        = [(query, r.payload["text"]) for r in results]
     cross_scores = get_crossencoder().predict(pairs).tolist()
 
-    # Step 5 — combine + sort by cross_score
-    combined = []
-    for result, cs in zip(results, cross_scores):
-        p = result.payload
-        combined.append({
-            # Content fields (used by agent.py to build Gemini prompt)
-            "text":        p.get("text", ""),
-            "title":       p.get("title", ""),
-            "section":     p.get("section", ""),
-            "breadcrumbs": p.get("breadcrumbs", []),
-            "source_url":  p.get("source_url", ""),
-            "description": p.get("description", ""),
+    # Step 7 — combine + sort by cross_score
+    combined = sorted(
+        [
+            {
+                # Content (agent.py uses these for Gemini prompt)
+                "text":        r.payload.get("text", ""),
+                "title":       r.payload.get("title", ""),
+                "section":     r.payload.get("section", ""),
+                "breadcrumbs": r.payload.get("breadcrumbs", []),
+                "source_url":  r.payload.get("source_url", ""),
+                "description": r.payload.get("description", ""),
 
-            # Operational fields (used for product_area, tracing, guardrails)
-            "domain":      p.get("domain", ""),
-            "subdomain":   p.get("subdomain", ""),
-            "last_updated":p.get("last_updated", ""),
-            "source":      p.get("source", ""),
-            "chunk_id":    p.get("chunk_id", ""),
+                # Operational (product_area, trace log, guardrails)
+                "domain":      r.payload.get("domain", ""),
+                "subdomain":   r.payload.get("subdomain", ""),
+                "last_updated":r.payload.get("last_updated", ""),
+                "source":      r.payload.get("source", ""),
+                "chunk_id":    r.payload.get("chunk_id", ""),
 
-            # Scores (used by guardrails.py for confidence threshold)
-            "bi_score":    round(result.score, 4),
-            "cross_score": round(float(cs), 4),
-        })
-
-    combined.sort(key=lambda x: x["cross_score"], reverse=True)
+                # Scores
+                "rrf_score":   round(r.score, 6),    # RRF fusion score
+                "cross_score": round(float(cs), 4),  # cross-encoder (final sort key)
+            }
+            for r, cs in zip(results, cross_scores)
+        ],
+        key     = lambda x: x["cross_score"],
+        reverse = True,
+    )
 
     ms  = round((time.time() - t0) * 1000)
     top = combined[0]["cross_score"] if combined else "N/A"
