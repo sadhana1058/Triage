@@ -1,1 +1,78 @@
-issue,subject,company,response,product_area,status,request_type,justification
+status,product_area,response,justification,request_type
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,visa,"We understand this is an urgent situation. For security-related issues like this, please contact your card issuer or bank directly — they have dedicated fraud teams available 24/7. Your case has been escalated to our support team as well.",Hard escalation triggered by keyword: 'hard escalation keyword: 'identity theft'',product_issue
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,claude,Thank you for bringing this to our attention. Security reports require immediate specialist review. Your report has been escalated to our security team.,Hard escalation triggered by keyword: 'hard escalation keyword: 'security vulnerability'',product_issue
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,visa,Thank you for reaching out. Your request requires specialist attention and has been escalated to our support team who will contact you shortly.,Hard escalation triggered by keyword: 'hard escalation keyword: 'urgent cash'',product_issue
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,We cannot process this type of request.,Escalated by guardrail: malicious request detected: 'delete all files',invalid
+escalated,general,We were unable to process your request. Please contact support directly.,Escalated by guardrail: prompt injection detected: 'règles internes',invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid
+escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
+query.list[float].0
+  Input should be a valid number [type=float_t",invalid

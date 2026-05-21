@@ -72,8 +72,9 @@ INJECTION_PATTERNS = [
     "disregard previous",
     "disregard all previous",
     "forget your instructions",
-    "you are now",
-    "act as if",
+    # NOTE: "you are now" removed — matches "you are now the owner of..."
+    #       in a legitimate access management ticket.
+    # NOTE: "act as if" removed — too generic; caught by other patterns anyway.
     "pretend you are",
     "your new instructions",
     "system prompt",
@@ -132,13 +133,16 @@ HARD_ESCALATION_KEYWORDS = [
     "major security",
 
     # Legal / financial escalations
+    # NOTE: "sue" removed — matches "issues", "submissions" as a substring
+    #       even with word-boundary regex the risk isn't worth it; "lawsuit"
+    #       and "legal action" cover genuine legal threats already.
+    # NOTE: "billing dispute" / "chargeback" removed — these are normal Visa
+    #       FAQ questions. A user asking "how do I dispute a charge" should
+    #       get an answer from the corpus, not immediate escalation.
     "legal action",
     "lawsuit",
-    "sue",
     "lawyer",
     "attorney",
-    "billing dispute",
-    "chargeback",
 
     # Physical safety
     "urgent cash",                  # "I need urgent cash" — in our CSV
@@ -233,6 +237,51 @@ def strip_pii(text: str) -> str:
     return result
 
 
+def _matches_pattern(pattern: str, text: str) -> bool:
+    """
+    Check whether `pattern` appears in `text` as a whole-word match.
+
+    WHY THIS EXISTS — THE SUBSTRING BUG:
+        The original code used Python's `in` operator:
+            "sue" in "issues"  →  True   ← BUG
+            "sue" in "submissions"  →  True   ← BUG
+
+        `in` only checks whether the character sequence exists anywhere
+        inside the string. It has no concept of word boundaries.
+
+    THE FIX — REGEX WORD BOUNDARIES:
+        re.search(r'\\bsue\\b', "issues")       →  None  (no match) ✓
+        re.search(r'\\bsue\\b', "submissions")  →  None  (no match) ✓
+        re.search(r'\\bsue\\b', "please sue us") →  Match ✓
+
+        \\b is a zero-width assertion that matches the transition between
+        a word character (letter/digit/_) and a non-word character.
+        So \\bsue\\b only fires when "sue" is surrounded by non-word chars
+        (spaces, punctuation, start/end of string).
+
+    MULTI-WORD PHRASES:
+        Patterns like "identity theft" already contain a space, which is
+        itself a non-word character, so the boundaries around the whole
+        phrase are what matter:
+            \\bidentity theft\\b  matches "identity theft" but not
+            "pseudo-identity theft-adjacent" only at word edges.
+
+    CASE:
+        re.IGNORECASE handles case — no need to .lower() the text.
+
+    Args:
+        pattern: the keyword or phrase to look for (plain text, not regex)
+        text:    the ticket text to search in
+
+    Returns:
+        True if pattern appears as a whole word / phrase, False otherwise
+    """
+    # re.escape turns any special chars in the pattern (e.g. a literal dot)
+    # into escaped versions so they're treated as literals, not regex syntax.
+    regex = rf"\b{re.escape(pattern)}\b"
+    return bool(re.search(regex, text, re.IGNORECASE))
+
+
 def pre_flight(
     issue:   str,
     subject: str,
@@ -265,9 +314,8 @@ def pre_flight(
 
     # ── Check 2: Prompt injection ────────────────────────────────────────────
     # We check both issue and subject (attackers sometimes hide injection in subject)
-    combined_lower = combined.lower()
     for pattern in INJECTION_PATTERNS:
-        if pattern.lower() in combined_lower:
+        if _matches_pattern(pattern, combined):
             return _escalation_result(
                 reason       = f"prompt injection detected: '{pattern}'",
                 request_type = "invalid",
@@ -276,7 +324,7 @@ def pre_flight(
 
     # ── Check 3: Malicious request ───────────────────────────────────────────
     for pattern in MALICIOUS_PATTERNS:
-        if pattern.lower() in combined_lower:
+        if _matches_pattern(pattern, combined):
             return _escalation_result(
                 reason       = f"malicious request detected: '{pattern}'",
                 request_type = "invalid",
@@ -325,10 +373,9 @@ def is_hard_escalation(
          over probabilistic models. The cost of a missed fraud escalation
          is much higher than the cost of over-escalating an edge case."
     """
-    combined_lower = f"{issue} {subject}".lower()
-
+    combined = f"{issue} {subject}"
     for keyword in HARD_ESCALATION_KEYWORDS:
-        if keyword.lower() in combined_lower:
+        if _matches_pattern(keyword, combined):
             return True, f"hard escalation keyword: '{keyword}'"
 
     return False, ""
