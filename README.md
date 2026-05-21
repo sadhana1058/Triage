@@ -25,3 +25,28 @@ hackerrank-orchestrate-may26-main/
 ├── README.md
 ├── problem_statement.md
 └── evalutation_criteria.md
+
+This command will compare the predictions in `support_tickets/output.csv` with the ground truth labels and display evaluation metrics.
+
+## File Structure
+
+- `code/`: Contains the main codebase.
+  - `main.py`: The entry point of the application.
+  - `agent.py`: Implements the agentic loop and orchestrates the pipeline.
+  - `retriever.py`: Handles the retrieval of relevant support documents.
+  - `guardrails.py`: Implements pre-flight and post-generation checks.
+  - `tracer.py`: Provides tracing and logging functionality.
+  - `evaluator.py`: Evaluates the model's performance against ground truth.
+- `data/`: Contains the support corpus for each domain.
+- `support_tickets/`: Contains the input CSV file and the generated output.
+- `traces/`: Contains the trace files for each run.
+- `.env`: Environment configuration file.
+- `requirements.txt`: Lists the required Python dependencies.
+
+## Contributing
+
+Contributions are welcome! If you find any issues or have suggestions for improvements, please open an issue or submit a pull request.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
