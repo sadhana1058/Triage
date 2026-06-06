@@ -52,7 +52,7 @@ from qdrant_client.models import (
     PointStruct, SparseVector,
     Filter, FieldCondition, MatchValue,
     Prefetch, FusionQuery, Fusion,
-    NamedVector, NamedSparseVector,
+    # NamedVector, NamedSparseVector,
 )
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
@@ -711,15 +711,29 @@ def retrieve(
         collection_name = COLLECTION_NAME,
         prefetch        = [
             # Dense arm: semantic search
+            # Prefetch(
+            #     query        = NamedVector(name=DENSE_VEC, vector=dense_qvec),
+            #     filter       = qdrant_filter,
+            #     limit        = top_k,
+            #     score_threshold = BI_SCORE_FLOOR,
+            # ),
+            # # Sparse arm: keyword search
+            # Prefetch(
+            #     query        = NamedSparseVector(name=SPARSE_VEC, vector=sparse_qvec),
+            #     filter       = qdrant_filter,
+            #     limit        = top_k,
+            # ),
             Prefetch(
-                query        = NamedVector(name=DENSE_VEC, vector=dense_qvec),
+                query        = dense_qvec,
+                using        = DENSE_VEC,
                 filter       = qdrant_filter,
                 limit        = top_k,
                 score_threshold = BI_SCORE_FLOOR,
             ),
-            # Sparse arm: keyword search
+# Sparse arm: keyword search
             Prefetch(
-                query        = NamedSparseVector(name=SPARSE_VEC, vector=sparse_qvec),
+                query        = sparse_qvec,
+                using        = SPARSE_VEC,
                 filter       = qdrant_filter,
                 limit        = top_k,
             ),

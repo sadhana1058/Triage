@@ -151,11 +151,9 @@ def _load_tickets() -> pd.DataFrame | None:
 
 @app.command()
 def run(
-    rebuild: bool = typer.Option(
-        False,
-        "--rebuild",
-        help="Force rebuild of the Qdrant index from scratch. Use when corpus changes.",
-    ),
+    rebuild: bool = typer.Option(False, "--rebuild", 
+                                 is_flag=True, 
+                                 help="Force rebuild of the Qdrant index from scratch."),
 ) -> None:
     """
     Process all tickets in support_tickets.csv and write output.csv.
