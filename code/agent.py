@@ -9,31 +9,27 @@ PUBLIC API (called by main.py):
     run_agent(tickets_df, client, trace_path) → output_df
 
 INTERNAL FUNCTIONS:
-    rewrite_query()       Gemini call #1 — rephrase ticket as clean search query
-    build_prompt()        assemble retrieved chunks + ticket into Gemini prompt
-    call_gemini()         Gemini call #2 — generate structured JSON answer
-    parse_gemini_output() safely extract JSON from Gemini response
-    process_ticket()      orchestrate all steps for one ticket
-    run_agent()           loop over all tickets, write output.csv
+    rewrite_query()    OpenAI call #1 — rephrase ticket as clean search query
+    build_prompt()     assemble retrieved chunks + ticket into prompt
+    call_openai()      OpenAI call #2 — generate structured JSON answer
+    parse_llm_output() safely extract JSON from response
+    process_ticket()   orchestrate all steps for one ticket
+    run_agent()        loop over all tickets, write output.csv
 
-GEMINI RATE LIMIT STRATEGY:
-    Free tier = 15 RPM (requests per minute)
-    Per ticket: 2 calls (rewrite + generate)
-    sleep(4) between tickets
-    56 tickets × 2 = 112 calls → ~4 minutes total
-    Retry on invalid output = 3 calls max → still safe
+LLM BACKEND: OpenAI (gpt-4o-mini by default, configurable in config.py)
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from pathlib import Path
 from typing import Optional
 
-import google.generativeai as genai
+import os
+
+import openai
 import pandas as pd
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
@@ -41,36 +37,10 @@ from qdrant_client import QdrantClient
 import guardrails
 import retriever
 import tracer
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SETUP — load API key, configure Gemini
-# ─────────────────────────────────────────────────────────────────────────────
+from config import OPENAI_MODEL, SLEEP_BETWEEN_TICKETS, TOP_CHUNKS_FOR_PROMPT
 
 load_dotenv()
-
-# WHY configure once at module level?
-#   genai.configure() is a global call — doing it per-ticket wastes time
-#   and risks race conditions if we ever parallelise.
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-# WHY gemini-2.0-flash?
-#   Fastest model on free tier. For structured output tasks (JSON extraction)
-#   it performs nearly identically to larger models.
-#   Pro models are slower and have lower RPM on free tier.
-GEMINI_MODEL = "gemini-2.0-flash"
-
-# Rate limiting
-SLEEP_BETWEEN_TICKETS = 4    # seconds — keeps us under 15 RPM
-MAX_RETRIES           = 1    # retry invalid output once before escalating
-
-# How many retrieved chunks to include in the prompt
-# Top 3 after cross-encoder ranking are the most relevant.
-# Adding more chunks adds noise and burns prompt tokens.
-TOP_CHUNKS_FOR_PROMPT = 3
-
-# Paths
-TICKETS_PATH = Path(__file__).parent.parent / "support_tickets" / "support_tickets.csv"
-OUTPUT_PATH  = Path(__file__).parent.parent / "support_tickets" / "output.csv"
+_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,24 +92,20 @@ Company: {company}
 Search query:"""
 
     try:
-        model    = genai.GenerativeModel(GEMINI_MODEL)
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                temperature=0.1,      # low temperature = deterministic, focused
-                max_output_tokens=50, # we only want a short query
-            ),
+        response  = _client.chat.completions.create(
+            model       = OPENAI_MODEL,
+            messages    = [{"role": "user", "content": prompt}],
+            temperature = 0.1,
+            max_tokens  = 50,
         )
-        rewritten = response.text.strip()
+        rewritten = response.choices[0].message.content.strip()
 
-        # Sanity check — if Gemini returned something weird, fall back
         if not rewritten or len(rewritten) > 200:
             return issue[:300]
 
         return rewritten
 
     except Exception as e:
-        # Network error, rate limit, etc. — fall back gracefully
         print(f"[agent] Query rewrite failed ({e}), using raw issue text")
         return issue[:300]
 
@@ -202,10 +168,11 @@ def build_prompt(
 RULES (follow strictly):
 1. Answer using ONLY the provided documentation below.
 2. Do NOT use outside knowledge or make up information.
-3. If the documentation does not cover the ticket, set response to exactly: CAN_NOT_ANSWER
-4. Never invent URLs, policies, prices, or steps not in the documentation.
-5. Be concise and helpful. Address the user directly.
-6. If the ticket asks for something impossible or inappropriate, classify as invalid."""
+3. Use whatever is relevant in the docs — even partial coverage is enough to give a helpful reply.
+4. Only set status="escalated" if the ticket is truly sensitive (fraud, security, legal) OR the docs have zero relevant information.
+5. Never invent URLs, policies, prices, or steps not in the documentation.
+6. Be concise and helpful. Address the user directly.
+7. If the ticket asks for something impossible or inappropriate, classify as invalid."""
 
     if retry:
         system_instruction += "\n\nCRITICAL: Return ONLY the JSON object. No prose, no markdown, no explanation."
@@ -249,8 +216,8 @@ RULES (follow strictly):
 
 {
   "status": "replied" or "escalated",
-  "product_area": "the specific product area or support category (e.g. screen, skillup, interviews, billing, privacy, amazon_bedrock, travel_support, dispute_resolution)",
-  "response": "your complete response to the user — friendly, helpful, grounded in the docs above. If unanswerable write: CAN_NOT_ANSWER",
+  "product_area": "the specific product area. Pick the closest match from: screen, skillup, community, interviews, billing, privacy, conversation_management, amazon_bedrock, travel_support, dispute_resolution, general_support, manage_account. Use lowercase_underscore format.",
+  "response": "your complete response to the user — friendly, helpful, grounded in the docs above. Use partial doc coverage to give the best answer you can.",
   "justification": "1-2 sentences explaining your routing decision and which doc supported your answer",
   "request_type": "product_issue" or "feature_request" or "bug" or "invalid",
   "confidence": 0.0
@@ -275,59 +242,92 @@ Return ONLY the JSON object. No markdown fences, no explanation text."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 — CALL GEMINI
+# STEP 2.5 — CLASSIFY LOW-CONFIDENCE TICKETS
+# When retrieval finds no relevant docs, classify before deciding to escalate.
+# Off-topic/invalid tickets should reply politely; legitimate issues escalate.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def classify_low_confidence(issue: str, subject: str, company: str) -> tuple[str, str]:
+    """
+    When retrieval confidence is low, classify the ticket as invalid or legitimate.
+
+    Returns:
+        ("invalid",    short_reply)  → off-topic, greeting, spam → reply politely
+        ("legitimate", "")           → real support issue, no corpus coverage → escalate
+
+    WHY a separate call here?
+        Retrieval failing means our corpus can't help. But two very different
+        situations cause this:
+          1. The ticket is off-topic ("What is the actor in Iron Man?")
+             → The right response is a polite "out of scope" reply, not escalation.
+          2. The ticket is a real issue we just don't have docs for ("site is down")
+             → Escalation to a human is correct.
+        One cheap LLM call distinguishes the two cases and avoids unnecessary
+        human escalations for invalid tickets.
+    """
+    prompt = f"""A customer sent this support ticket. Our knowledge base has no relevant documentation for it.
+
+Ticket subject: {subject or "(none)"}
+Ticket body: {issue[:400]}
+Company: {company}
+
+Classify this ticket:
+- "invalid": off-topic, spam, greeting, thank-you, question unrelated to software/financial/tech support
+- "legitimate": a real support request we just don't have documentation for
+
+If "invalid", write a short, friendly reply (1-2 sentences max).
+If "legitimate", leave reply as empty string.
+
+Return ONLY this JSON (no markdown, no extra text):
+{{"type": "invalid" or "legitimate", "reply": "short reply or empty string"}}"""
+
+    try:
+        raw, _, _, _ = call_openai(prompt)
+        data = parse_llm_output(raw)
+        if data and data.get("type") in {"invalid", "legitimate"}:
+            return data["type"], data.get("reply", "")
+    except Exception:
+        pass
+
+    # Default: treat as legitimate → escalate (safe fallback)
+    return "legitimate", ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3 — CALL OPENAI
 # Send the prompt, get back text, measure latency and tokens.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def call_gemini(prompt: str) -> tuple[str, int, int, int]:
+def call_openai(prompt: str) -> tuple[str, int, int, int]:
     """
-    Send a prompt to Gemini and return the response with metadata.
-
-    WHY measure tokens here?
-        Token counts tell us how much of the context window we're using.
-        If prompt_tokens > 8000 we know our prompt is too long —
-        Gemini might truncate it which causes bad answers.
-        We log this in tracer.py for post-run analysis.
-
-    WHY temperature=0.2 for generation (not 0.0)?
-        0.0 = fully deterministic. Identical tickets → identical answers.
-        0.2 = very low randomness. Slightly more natural language variation
-        while still being reliable and consistent.
-        Retrieval and routing decisions are deterministic (guardrails).
-        Response phrasing can have tiny natural variation.
+    Send a prompt to OpenAI and return the response with metadata.
 
     Returns:
         (response_text, prompt_tokens, completion_tokens, latency_ms)
-        response_text = raw text from Gemini (may include markdown fences)
 
     On failure:
-        Returns ("", 0, 0, 0) — caller handles empty string as failure.
+        Returns ("", 0, 0, latency_ms) — caller handles empty string as failure.
     """
     t0 = time.time()
 
     try:
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                temperature=0.2,
-                max_output_tokens=1000,
-            ),
+        response = _client.chat.completions.create(
+            model       = OPENAI_MODEL,
+            messages    = [{"role": "user", "content": prompt}],
+            temperature = 0.2,
+            max_tokens  = 1000,
         )
 
-        latency_ms = round((time.time() - t0) * 1000)
+        latency_ms    = round((time.time() - t0) * 1000)
+        response_text = response.choices[0].message.content.strip()
+        prompt_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
 
-        # Extract token counts from response metadata
-        # (available in Gemini API response object)
-        usage          = response.usage_metadata
-        prompt_tokens  = usage.prompt_token_count     if usage else 0
-        output_tokens  = usage.candidates_token_count if usage else 0
-
-        return response.text.strip(), prompt_tokens, output_tokens, latency_ms
+        return response_text, prompt_tokens, output_tokens, latency_ms
 
     except Exception as e:
         latency_ms = round((time.time() - t0) * 1000)
-        print(f"[agent] Gemini call failed ({e})")
+        print(f"[agent] OpenAI call failed ({e})")
         return "", 0, 0, latency_ms
 
 
@@ -336,7 +336,7 @@ def call_gemini(prompt: str) -> tuple[str, int, int, int]:
 # Safely extract JSON from Gemini's response text.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def parse_gemini_output(raw_text: str) -> Optional[dict]:
+def parse_llm_output(raw_text: str) -> Optional[dict]:
     """
     Safely extract a JSON dict from Gemini's raw response text.
 
@@ -421,8 +421,8 @@ def process_ticket(
         5. retrieve()             — hybrid search + cross-encoder re-rank
         6. post_retrieval()       — confidence threshold check (0.55)
         7. build_prompt()         — assemble context + ticket into Gemini prompt
-        8. call_gemini()          — Gemini call #2: generate structured answer
-        9. parse_gemini_output()  — safely extract JSON
+        8. call_openai()          — Gemini call #2: generate structured answer
+        9. parse_llm_output()  — safely extract JSON
         10. post_generation()     — validate enums, URLs, empty responses
         11. [retry if invalid]    — one retry with stricter prompt
         12. finish_trace()        — append JSONL line to trace file
@@ -555,33 +555,46 @@ def process_ticket(
     if not good_enough:
         print(f"[agent] Post-retrieval FAILED: {reason}")
 
-        # Infer product_area from best chunk even if confidence is low
-        product_area = guardrails.infer_product_area(chunks, company)
+        # Classify: invalid/off-topic → reply politely; legitimate issue → escalate
+        ticket_class, short_reply = classify_low_confidence(issue, subject, company)
 
-        result = {
-            "status":        "escalated",
-            "product_area":  product_area,
-            "response":      (
-                "Thank you for reaching out. We don't have enough information "
-                "in our knowledge base to fully address your request. "
-                "Your ticket has been escalated to a specialist."
-            ),
-            "justification": f"Escalated: {reason}. Insufficient corpus coverage to answer safely.",
-            "request_type":  "product_issue",
-        }
+        if ticket_class == "invalid":
+            print(f"[agent] Classified as invalid/off-topic → replying out-of-scope")
+            result = {
+                "status":        "replied",
+                "product_area":  "general",
+                "response":      short_reply or "I'm sorry, this is out of scope from my capabilities.",
+                "justification": "Ticket is off-topic or invalid — no corpus coverage, replied with out-of-scope message.",
+                "request_type":  "invalid",
+            }
+        else:
+            print(f"[agent] Classified as legitimate → escalating (no corpus coverage)")
+            product_area = guardrails.infer_product_area(chunks, company)
+            result = {
+                "status":        "escalated",
+                "product_area":  product_area,
+                "response":      (
+                    "Thank you for reaching out. We don't have enough information "
+                    "in our knowledge base to fully address your request. "
+                    "Your ticket has been escalated to a specialist."
+                ),
+                "justification": f"Escalated: {reason}. Insufficient corpus coverage to answer safely.",
+                "request_type":  "product_issue",
+            }
+
         tracer.finish_trace(trace, result, trace_path)
         return result
 
     # ── STEP 7 + 8: Build prompt and call Gemini ─────────────────────────────
     # This is the generation step. We build the prompt with top 3 chunks
     # and call Gemini for a structured JSON response.
-    print("[agent] Calling Gemini for answer generation...")
+    print("[agent] Calling Claude for answer generation...")
 
     prompt         = build_prompt(issue, subject, company, chunks, retry=False)
-    raw_text, tokens_in, tokens_out, gen_ms = call_gemini(prompt)
+    raw_text, tokens_in, tokens_out, gen_ms = call_openai(prompt)
 
-    # ── STEP 9: Parse Gemini output ───────────────────────────────────────────
-    parsed = parse_gemini_output(raw_text)
+    # ── STEP 9: Parse output ─────────────────────────────────────────────────
+    parsed = parse_llm_output(raw_text)
 
     # ── STEP 10: Post-generation validation ───────────────────────────────────
     if parsed:
@@ -590,20 +603,18 @@ def process_ticket(
         is_valid, cleaned = False, None
 
     # ── STEP 11: Retry once if invalid ───────────────────────────────────────
-    # On retry: stricter prompt, log it, try once more.
-    # If still fails: force escalate.
     if not is_valid or cleaned is None:
         print("[agent] Output invalid — retrying with stricter prompt...")
 
         retry_prompt = build_prompt(issue, subject, company, chunks, retry=True)
-        raw_text2, tokens_in2, tokens_out2, gen_ms2 = call_gemini(retry_prompt)
+        raw_text2, tokens_in2, tokens_out2, gen_ms2 = call_openai(retry_prompt)
 
         # Accumulate token counts from both calls
         tokens_in  += tokens_in2
         tokens_out += tokens_out2
         gen_ms     += gen_ms2
 
-        parsed2 = parse_gemini_output(raw_text2)
+        parsed2 = parse_llm_output(raw_text2)
         if parsed2:
             is_valid2, cleaned2 = guardrails.post_generation(parsed2, chunks)
             if is_valid2 or cleaned2:
@@ -635,7 +646,7 @@ def process_ticket(
                 "We were unable to generate a reliable answer for your request. "
                 "Your ticket has been escalated to our support team."
             ),
-            "justification": "Escalated: Gemini failed to produce valid structured output after retry.",
+            "justification": "Escalated: Claude failed to produce valid structured output after retry.",
             "request_type":  "product_issue",
         }
 

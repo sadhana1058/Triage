@@ -1,78 +1,30 @@
 status,product_area,response,justification,request_type
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
+replied,manage_account,"To restore your access to the Claude team workspace, please contact your IT admin. They can reassign your seat by going to Organization settings, finding your name, and selecting 'Enterprise seat' under Seat Type.","The response is based on the process for temporarily removing and restoring access as outlined in the documentation. Specifically, it references the need for an admin to manage seat assignments.",product_issue
+replied,general,"Thank you for reaching out! Unfortunately, we cannot assist with disputes regarding test scores or recruitment decisions.","Ticket is off-topic or invalid — no corpus coverage, replied with out-of-scope message.",invalid
+replied,general,"Thank you for reaching out! Unfortunately, we can't assist with issues related to specific merchants or refunds. Please contact your bank or the merchant directly for help.","Ticket is off-topic or invalid — no corpus coverage, replied with out-of-scope message.",invalid
+replied,billing,"If your mock interviews stopped unexpectedly and you are seeking a refund, please contact our support team at help@hackerrank.com. They will review your request promptly.","The response is based on the refund policy outlined in the documentation, which states to contact support for refund requests.",product_issue
+escalated,settings,Thank you for reaching out. We don't have enough information in our knowledge base to fully address your request. Your ticket has been escalated to a specialist.,Escalated: low retrieval confidence: top cross_score=-1.287 < 0.55. Insufficient corpus coverage to answer safely.,product_issue
+escalated,general_support,"I'm sorry, but I cannot assist with the infosec process or filling in forms for your company. Please refer to your internal resources or consult with your information security team for guidance.","The request is outside the scope of the provided documentation, which does not cover infosec processes or form filling.",invalid
+escalated,integrations,Thank you for reaching out. We don't have enough information in our knowledge base to fully address your request. Your ticket has been escalated to a specialist.,Escalated: low retrieval confidence: top cross_score=0.537 < 0.55. Insufficient corpus coverage to answer safely.,product_issue
+replied,community,"It seems like you are having issues with your submissions not working on the website. Please ensure that you are logged into the same HackerRank Community account that you used to participate in the challenges, as results do not appear across different accounts. If the issue persists, you can contact HackerRank support at help@hackerrank.com for further assistance.","I provided guidance based on the documentation regarding account verification and support contact information, which is relevant to your issue with submissions.",product_issue
+replied,general_support,I understand you're facing a blocker with the Zoom connectivity during the compatibility check. I recommend checking the WebSocket connectivity issues as the compatibility page now detects these and provides guidance to resolve them. You can find more information on troubleshooting test login errors if needed.,"The response is based on the information about WebSocket connectivity checks from the release notes, which can help resolve the issue you're experiencing.",product_issue
+escalated,general_help,Thank you for reaching out. We don't have enough information in our knowledge base to fully address your request. Your ticket has been escalated to a specialist.,Escalated: low retrieval confidence: top cross_score=-0.716 < 0.55. Insufficient corpus coverage to answer safely.,product_issue
+escalated,interviews,"Unfortunately, the documentation does not provide information regarding inactivity times for candidates or interviewers in HackerRank interviews. I recommend reaching out to your internal HR or technical support team for assistance with this issue.","The request pertains to inactivity times, which is not covered in the provided documentation. Therefore, I have escalated the ticket.",product_issue
+escalated,claude,Thank you for reaching out. We don't have enough information in our knowledge base to fully address your request. Your ticket has been escalated to a specialist.,Escalated: low retrieval confidence: top cross_score=-5.181 < 0.55. Insufficient corpus coverage to answer safely.,product_issue
+escalated,manage_account,"I'm sorry, but I cannot provide information on how to remove a user from the platform as it is not covered in the available documentation.","The documentation does not include any information regarding user removal, which necessitates escalation.",product_issue
+replied,billing,You can pause your subscription instead of canceling it. This allows you to resume whenever needed. Please follow the instructions in your account settings to pause your subscription.,"The response is based on the information about the Pause Subscription feature in the documentation, which allows users to temporarily pause their subscription.",product_issue
+escalated,claude,Thank you for reaching out. We don't have enough information in our knowledge base to fully address your request. Your ticket has been escalated to a specialist.,Escalated: low retrieval confidence: top cross_score=-0.544 < 0.55. Insufficient corpus coverage to answer safely.,product_issue
 escalated,visa,"We understand this is an urgent situation. For security-related issues like this, please contact your card issuer or bank directly — they have dedicated fraud teams available 24/7. Your case has been escalated to our support team as well.",Hard escalation triggered by keyword: 'hard escalation keyword: 'identity theft'',product_issue
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
+replied,general_support,"I understand you're having trouble with the Resume Builder. Currently, this tool is available to a limited percentage of users, and it may be experiencing temporary issues. Please try again later, and if the problem persists, let us know.","The response is based on the information that the Resume Builder is active for only 2% of the community, which may indicate limited availability. This is supported by the details in the documentation.",product_issue
+replied,community,"To update your name on the certificate, you need to log in to your HackerRank Community account, go to the **Certify** tab, and click **Regenerate Certificate**. In the confirmation dialog, click **Update Name** to change it. Please ensure that the name you enter is exactly as you want it to appear, as it cannot be changed later.","The response is based on the steps provided in the documentation for updating a certificate name, specifically from the Certifications section. This directly addresses the user's request.",product_issue
+replied,dispute_resolution,"To dispute a charge, please contact your issuer or bank using the freephone number located on the front or back of your Visa card. They will likely require detailed information regarding the transaction to assist you in resolving the dispute.","This response is based on the information provided in document [1], which outlines the process for disputing a charge.",product_issue
 escalated,claude,Thank you for bringing this to our attention. Security reports require immediate specialist review. Your report has been escalated to our security team.,Hard escalation triggered by keyword: 'hard escalation keyword: 'security vulnerability'',product_issue
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
+replied,privacy,"To stop Claude from crawling your website, you need to modify your robots.txt file. Add the following lines: User-agent: ClaudeBot Disallow: /. This will prevent Claude from crawling your site. Make sure to do this for every subdomain you wish to opt out from.","The response is based on the information provided in the documentation regarding how to block crawling by Claude. Specifically, it references the need to modify the robots.txt file as outlined in the privacy documentation.",product_issue
 escalated,visa,Thank you for reaching out. Your request requires specialist attention and has been escalated to our support team who will contact you shortly.,Hard escalation triggered by keyword: 'hard escalation keyword: 'urgent cash'',product_issue
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
+replied,privacy,"When you allow Claude to use your data to improve the models, it is used solely for that purpose and is de-linked from your user ID before any review. However, the documentation does not specify a duration for how long the data will be used.","The response is based on the privacy protections outlined in the documentation, which explains how data is handled but does not provide a specific timeframe for usage.",product_issue
 escalated,general,We cannot process this type of request.,Escalated by guardrail: malicious request detected: 'delete all files',invalid
-escalated,general,We were unable to process your request. Please contact support directly.,Escalated by guardrail: prompt injection detected: 'règles internes',invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
-escalated,general,An unexpected error occurred. Your ticket has been escalated.,"System error: 23 validation errors for Prefetch
-query.list[float].0
-  Input should be a valid number [type=float_t",invalid
+escalated,general_support,"Bonjour, je comprends que votre carte Visa a été bloquée pendant votre voyage. Malheureusement, je ne peux pas fournir les règles internes ou la logique exacte utilisée pour décider si un cas est une fraude. Je vous recommande de contacter directement le service client de Visa pour obtenir de l'aide concernant votre carte bloquée.","The request involves sensitive account information and requires direct customer service intervention, which is not covered in the provided documentation.",product_issue
+replied,amazon_bedrock,"To troubleshoot the issues you're facing with requests to Claude in AWS Bedrock, please confirm that your AWS credentials are correctly set up. You can check this by running `aws sts get-caller-identity` to ensure it works and that `AWS_REGION` is set to a region where your model is enabled. If you need further assistance, consider reaching out to AWS Support or your AWS account manager.","The response provides troubleshooting steps based on the documentation regarding AWS Bedrock and Claude. Specifically, it references the need to check AWS credentials and region settings as outlined in the docs.",product_issue
+replied,manage_account,"To remove an employee from your HackerRank hiring account, you will need to log in as a Company Admin, go to the Settings, and manage your user accounts accordingly. Unfortunately, the specific steps for removing a user are not detailed in the documentation provided, but you can find user management options in the Settings section.","The response is based on the need to manage user accounts, which falls under the manage_account area. The documentation mentions accessing settings but does not provide explicit steps for user removal.",product_issue
+replied,general_support,"To set up a Claude LTI key for your students, you need to create a Claude LTI Developer Key in Canvas. Sign in as an administrator, navigate to Admin -> Developer Keys, and click '+ Developer Key' then '+ LTI Key.' Fill in the required fields, including the Key Name, Description, and Redirect URIs. After saving, you can then install the Claude LTI app in your course by going to Admin -> Settings -> Apps and following the installation steps.","This response is based on the steps outlined in the documentation for creating a Claude LTI Developer Key and installing the Claude LTI app in Canvas, specifically from documents [2] and [1].",product_issue
+replied,general_support,"In the US Virgin Islands, merchants can require a minimum transaction amount of $10 for credit card purchases. This is an exception that applies specifically to credit cards in the USA and US territories. If you have concerns about this policy, please notify your Visa card issuer.","This response is based on the information in document [1], which outlines the exceptions for minimum transaction amounts in the USA and US territories.",product_issue

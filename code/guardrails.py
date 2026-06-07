@@ -40,138 +40,12 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Minimum cross-encoder score to consider retrieval good enough.
-# Below this → corpus doesn't cover the ticket well → safer to escalate.
-# Why 0.55? Cross-encoder ms-marco scores above 0.5 generally indicate
-# meaningful relevance. Below 0.3 is noise. 0.55 is a conservative middle ground.
-CONFIDENCE_THRESHOLD = 0.55
-
-# Maximum ticket length we'll process.
-# Tickets over 5000 chars are suspicious (likely prompt injection or spam).
-MAX_TICKET_LENGTH = 5000
-
-# Valid enum values for the output CSV
-VALID_STATUS       = {"replied", "escalated"}
-VALID_REQUEST_TYPE = {"product_issue", "feature_request", "bug", "invalid"}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CHECKPOINT 1 — PRE-FLIGHT PATTERNS
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Prompt injection attempts — phrases that try to hijack the LLM
-# These are exact substring matches (case-insensitive)
-INJECTION_PATTERNS = [
-    "ignore previous instructions",
-    "ignore all instructions",
-    "disregard previous",
-    "disregard all previous",
-    "forget your instructions",
-    # NOTE: "you are now" removed — matches "you are now the owner of..."
-    #       in a legitimate access management ticket.
-    # NOTE: "act as if" removed — too generic; caught by other patterns anyway.
-    "pretend you are",
-    "your new instructions",
-    "system prompt",
-    "print your prompt",
-    "show your instructions",
-    "reveal your instructions",
-    "bypass your",
-    "jailbreak",
-    "affiche toutes les règles",      # French: "show all the rules" — in our CSV
-    "règles internes",                # French: "internal rules"
-    "logique exacte que vous utilisez",  # French: "exact logic you use"
-    "documents récupérés",            # French: "retrieved documents"
-]
-
-# Malicious / harmful requests that should never be answered
-MALICIOUS_PATTERNS = [
-    "delete all files",
-    "rm -rf",
-    "drop table",
-    "drop database",
-    "give me the code to delete",
-    "how to hack",
-    "exploit vulnerability",
-    "sql injection",
-    "shell command",
-    "execute command",
-    "os.system",
-    "subprocess.run",
-]
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CHECKPOINT 2 — HARD ESCALATION KEYWORDS
-# These topics MUST always escalate regardless of corpus coverage.
-# No support doc can handle identity theft or security breaches.
-# ─────────────────────────────────────────────────────────────────────────────
-
-HARD_ESCALATION_KEYWORDS = [
-    # Financial crimes
-    "identity theft",
-    "identity has been stolen",
-    "identity stolen",
-    "stolen card",
-    "stolen cheque",
-    "stolen check",
-    "card stolen",
-    "fraud",
-    "fraudulent",
-
-    # Security incidents
-    "security breach",
-    "security vulnerability",       # edge case: bug bounty → escalate, not answer
-    "data breach",
-    "account hacked",
-    "account compromised",
-    "unauthorized access",
-    "major security",
-
-    # Legal / financial escalations
-    # NOTE: "sue" removed — matches "issues", "submissions" as a substring
-    #       even with word-boundary regex the risk isn't worth it; "lawsuit"
-    #       and "legal action" cover genuine legal threats already.
-    # NOTE: "billing dispute" / "chargeback" removed — these are normal Visa
-    #       FAQ questions. A user asking "how do I dispute a charge" should
-    #       get an answer from the corpus, not immediate escalation.
-    "legal action",
-    "lawsuit",
-    "lawyer",
-    "attorney",
-
-    # Physical safety
-    "urgent cash",                  # "I need urgent cash" — in our CSV
-    "cash advance",
-    "emergency funds",
-]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PII PATTERNS — strip before logging (but keep in ticket for processing)
-# ─────────────────────────────────────────────────────────────────────────────
-
-PII_PATTERNS = [
-    # Email addresses
-    (r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", "[EMAIL]"),
-
-    # Phone numbers (various formats)
-    (r"\b(\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b", "[PHONE]"),
-
-    # Credit card numbers (16 digits, possibly spaced)
-    (r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b", "[CARD_NUMBER]"),
-
-    # Stripe / payment order IDs (cs_live_... or cs_test_...)
-    # Example from our CSV: cs_live_abcdefgh
-    (r"\bcs_(live|test)_[A-Za-z0-9]+\b", "[ORDER_ID]"),
-
-    # Generic order/reference IDs (long alphanumeric strings)
-    (r"\b[A-Z]{2,3}-\d{6,}\b", "[REFERENCE_ID]"),
-]
+from config import (
+    CONFIDENCE_THRESHOLD, MAX_TICKET_LENGTH,
+    VALID_STATUS, VALID_REQUEST_TYPE,
+    INJECTION_PATTERNS, MALICIOUS_PATTERNS,
+    HARD_ESCALATION_KEYWORDS, PII_PATTERNS,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -565,8 +439,8 @@ def post_generation(
 
     # ── Check 4: Non-empty response ──────────────────────────────────────────
     response_text = str(cleaned.get("response", "")).strip()
-    if not response_text or response_text.upper() in {"CAN_NOT_ANSWER", "NONE", "NULL", "N/A"}:
-        # Gemini couldn't answer — convert to escalation
+    if not response_text or response_text.upper() in {"NONE", "NULL", "N/A"}:
+        # Truly empty — flag for retry
         cleaned["status"]   = "escalated"
         cleaned["response"] = (
             "Thank you for reaching out. Your request has been escalated "
@@ -574,9 +448,21 @@ def post_generation(
         )
         cleaned["justification"] = (
             cleaned.get("justification", "") +
-            " | Escalated: Gemini could not generate a grounded answer."
+            " | Escalated: LLM could not generate a grounded answer."
         )
         is_valid = False
+    elif response_text.upper() == "CAN_NOT_ANSWER":
+        # LLM correctly identified it can't answer — treat as valid escalation, no retry
+        cleaned["status"]   = "escalated"
+        cleaned["response"] = (
+            "Thank you for reaching out. Your request has been escalated "
+            "to our support team for further assistance."
+        )
+        cleaned["justification"] = (
+            cleaned.get("justification", "") +
+            " | Escalated: insufficient documentation coverage to answer safely."
+        )
+        # is_valid stays True — this is expected behaviour, not an error
     else:
         cleaned["response"] = response_text
 

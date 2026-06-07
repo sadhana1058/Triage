@@ -46,40 +46,21 @@ sys.path.insert(0, str(Path(__file__).parent))
 import agent
 import retriever
 import tracer
+from config import ROOT_DIR, TICKETS_PATH, OUTPUT_PATH, SAMPLE_PATH
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SETUP
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Load .env file from project root (GEMINI_API_KEY lives here)
-# load_dotenv() is idempotent — safe to call multiple times
-load_dotenv(Path(__file__).parent.parent / ".env")
+load_dotenv(ROOT_DIR / ".env")
 
-# Rich console — gives us coloured terminal output for free
-# WHY Rich over plain print?
-#   Panels, tables, colours make the output readable during a demo or judge run.
-#   Zero extra complexity — just swap print() for console.print().
 console = Console()
 
-# Typer app — turns functions into CLI commands
-# WHY Typer over argparse?
-#   Typer uses type hints to infer argument types automatically.
-#   Less boilerplate, cleaner code, free --help generation.
 app = typer.Typer(
-    name        = "orchestrate",
-    help        = "HackerRank Orchestrate — Support Triage Agent",
-    add_completion = False,   # disable shell completion (not needed for hackathon)
+    name           = "orchestrate",
+    help           = "HackerRank Orchestrate — Support Triage Agent",
+    add_completion = False,
 )
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PATHS — single source of truth
-# All file paths defined once here, not scattered across files.
-# ─────────────────────────────────────────────────────────────────────────────
-
-ROOT_DIR     = Path(__file__).parent.parent
-TICKETS_PATH = ROOT_DIR / "support_tickets" / "support_tickets.csv"
-OUTPUT_PATH  = ROOT_DIR / "support_tickets" / "output.csv"
-SAMPLE_PATH  = ROOT_DIR / "support_tickets" / "sample_support_tickets.csv"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -256,43 +237,51 @@ def eval() -> None:
     """
     _print_header()
 
-    # ── Check output.csv exists ───────────────────────────────────────────────
-    if not OUTPUT_PATH.exists():
-        console.print(Panel(
-            "[red]output.csv not found.[/red]\n\n"
-            "Run the agent first:\n"
-            "  [green]python main.py run[/green]",
-            title="No Predictions Found",
-            border_style="red",
-        ))
-        raise typer.Exit(code=1)
-
     # ── Check sample CSV exists ───────────────────────────────────────────────
     if not SAMPLE_PATH.exists():
         console.print(f"[red]ERROR: Sample file not found: {SAMPLE_PATH}[/red]")
         raise typer.Exit(code=1)
 
-    # ── Load both CSVs ────────────────────────────────────────────────────────
-    output_df = pd.read_csv(OUTPUT_PATH,  keep_default_na=False)
-    sample_df = pd.read_csv(SAMPLE_PATH,  keep_default_na=False)
+    # ── Load sample ground truth ──────────────────────────────────────────────
+    sample_df = pd.read_csv(SAMPLE_PATH, keep_default_na=False)
+    console.print(f"  Sample tickets : {len(sample_df)} rows (with ground truth labels)\n")
 
-    console.print(f"  Predictions : {len(output_df)} rows")
-    console.print(f"  Sample data : {len(sample_df)} rows\n")
+    # ── Build / load Qdrant index ─────────────────────────────────────────────
+    console.print("[bold]Step 1/3[/bold] — Loading models and Qdrant index...")
+    try:
+        qdrant_client = retriever.build_index(force_rebuild=False)
+    except Exception as e:
+        console.print(f"[red]ERROR: Failed to load index: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    # ── Run agent on sample tickets ───────────────────────────────────────────
+    # Sample CSV has the same Issue/Subject/Company columns as support_tickets.csv.
+    # We run the agent on these 10 labeled tickets so predictions are comparable.
+    console.print(f"\n[bold]Step 2/3[/bold] — Running agent on {len(sample_df)} sample tickets...")
+    sample_input = sample_df[["Issue", "Subject", "Company"]].copy()
+    trace_path   = tracer.make_trace_path()
+
+    try:
+        predictions_df = agent.run_agent(
+            tickets_df = sample_input,
+            client     = qdrant_client,
+            trace_path = trace_path,
+        )
+    except Exception as e:
+        console.print(f"[red]ERROR running agent on sample: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(f"\n[bold]Step 3/3[/bold] — Scoring predictions against ground truth...\n")
 
     # ── Import and run evaluator ──────────────────────────────────────────────
-    # WHY import here and not at top?
-    #   evaluator.py imports sklearn which adds ~1s to startup.
-    #   We only pay that cost when eval is actually called.
-    #   The run command doesn't need sklearn at all.
     try:
         import evaluator
         metrics = evaluator.evaluate(
-            predictions = output_df,
+            predictions  = predictions_df,
             ground_truth = sample_df,
         )
     except ImportError:
-        console.print("[red]ERROR: evaluator.py not found or missing dependencies.[/red]")
-        console.print("Install: [green]pip install scikit-learn rouge-score[/green]")
+        console.print("[red]ERROR: evaluator.py not found.[/red]")
         raise typer.Exit(code=1)
 
     # ── Print results table ───────────────────────────────────────────────────

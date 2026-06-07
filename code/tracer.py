@@ -40,12 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from guardrails import strip_pii
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-TRACES_DIR = Path(__file__).parent.parent / "traces"
+from config import TRACES_DIR
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -239,7 +234,6 @@ def add_generation_result(
     completion_tokens: int,
     latency_ms:        int,
     self_confidence:   float = 0.0,
-    query_rewritten:   str   = "",
 ) -> None:
     """
     Add Gemini generation metadata to the trace.
