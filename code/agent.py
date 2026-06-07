@@ -37,7 +37,7 @@ from qdrant_client import QdrantClient
 import guardrails
 import retriever
 import tracer
-from config import OPENAI_MODEL, SLEEP_BETWEEN_TICKETS, TOP_CHUNKS_FOR_PROMPT
+from config import OPENAI_MODEL, SLEEP_BETWEEN_TICKETS, TOP_CHUNKS_FOR_PROMPT, NUM_QUERY_VARIANTS
 
 load_dotenv()
 _client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -108,6 +108,103 @@ Search query:"""
     except Exception as e:
         print(f"[agent] Query rewrite failed ({e}), using raw issue text")
         return issue[:300]
+
+
+def generate_query_variants(primary_query: str, issue: str, company: str) -> list[str]:
+    """
+    Generate NUM_QUERY_VARIANTS - 1 alternative phrasings of the primary query.
+    Combined with the primary, this gives a pool of query variants for multi-retrieve.
+
+    WHY:
+        A single query phrasing can miss relevant chunks when the ticket uses
+        different vocabulary than the documentation. Multiple phrasings increase
+        the chance that at least one hits the right semantic neighbourhood.
+
+    Returns:
+        List of query strings: [primary_query, variant_2, variant_3, ...]
+        Falls back to [primary_query] alone if the LLM call fails.
+    """
+    if NUM_QUERY_VARIANTS <= 1:
+        return [primary_query]
+
+    n_variants = NUM_QUERY_VARIANTS - 1
+    prompt = f"""You are helping improve search recall. Given a primary search query, write {n_variants} alternative phrasings that express the same intent using different vocabulary.
+
+Primary query: {primary_query}
+Original ticket (context): {issue[:300]}
+Company: {company}
+
+Rules:
+- Each variant must be semantically equivalent but use different words
+- Keep each variant under 20 words
+- Return ONLY a JSON array of strings, no explanation
+
+Example output: ["variant one here", "variant two here"]"""
+
+    try:
+        response = _client.chat.completions.create(
+            model       = OPENAI_MODEL,
+            messages    = [{"role": "user", "content": prompt}],
+            temperature = 0.4,
+            max_tokens  = 120,
+        )
+        raw = response.choices[0].message.content.strip()
+        # Parse the JSON array
+        variants = json.loads(raw) if raw.startswith("[") else json.loads(raw[raw.find("["):raw.rfind("]")+1])
+        if isinstance(variants, list) and variants:
+            return [primary_query] + [str(v) for v in variants[:n_variants]]
+    except Exception as e:
+        print(f"[agent] Query variant generation failed ({e}), using primary only")
+
+    return [primary_query]
+
+
+def detect_and_translate(issue: str, subject: str) -> tuple[str, str]:
+    """
+    Detect the language of the ticket. If non-English, translate to English.
+
+    WHY:
+        Our corpus is entirely in English. A French or Spanish ticket embeds
+        into a different vector space and retrieves nothing relevant.
+        Translating before retrieval is the simplest fix that works globally
+        for any language without swapping the embedding model.
+
+    Returns:
+        (translated_issue, translated_subject)
+        Returns originals unchanged if already English or if detection fails.
+    """
+    combined = f"{subject} {issue[:200]}".strip()
+
+    prompt = f"""Detect the language of this text. If it is NOT English, translate the full ticket to English.
+
+Text: {combined}
+
+Return ONLY this JSON:
+{{"language": "english" or the language name, "translated_issue": "English translation or original if already English", "translated_subject": "English translation of subject or original"}}
+
+issue to translate: {issue[:500]}
+subject to translate: {subject}"""
+
+    try:
+        response = _client.chat.completions.create(
+            model       = OPENAI_MODEL,
+            messages    = [{"role": "user", "content": prompt}],
+            temperature = 0.0,
+            max_tokens  = 300,
+        )
+        raw  = response.choices[0].message.content.strip()
+        data = parse_llm_output(raw)
+        if data:
+            lang = data.get("language", "english").lower()
+            if lang != "english":
+                print(f"[agent] Detected language: {lang} — translating to English")
+                t_issue   = data.get("translated_issue", issue)
+                t_subject = data.get("translated_subject", subject)
+                return t_issue, t_subject
+    except Exception:
+        pass
+
+    return issue, subject
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -520,18 +617,30 @@ def process_ticket(
         tracer.finish_trace(trace, result, trace_path)
         return result
 
-    # ── STEP 4: Query rewrite ─────────────────────────────────────────────────
-    # Gemini call #1 — clean the ticket for retrieval.
-    # Falls back to raw issue text if Gemini fails.
+    # ── STEP 4a: Language detection + translation ─────────────────────────────
+    # Translate non-English tickets to English before retrieval.
+    # Our corpus is English-only; mismatched language vectors retrieve nothing.
+    issue_for_retrieval, subject_for_retrieval = detect_and_translate(issue, subject)
+
+    # ── STEP 4b: Query rewrite ────────────────────────────────────────────────
+    # Rephrase noisy ticket text into a clean retrieval query.
+    # Falls back to raw issue text if LLM fails.
     print("[agent] Rewriting query...")
-    query_rewritten = rewrite_query(issue, subject, company)
+    query_rewritten = rewrite_query(issue_for_retrieval, subject_for_retrieval, company)
     print(f"[agent] Query: '{query_rewritten}'")
 
-    # ── STEP 5: Hybrid retrieval ──────────────────────────────────────────────
-    # Dense + sparse → Qdrant RRF → cross-encoder re-rank
+    # ── STEP 4c: Generate query variants ─────────────────────────────────────
+    # Generate alternative phrasings of the primary query so that multi-retrieve
+    # can pull candidates using different vocabulary — increases recall globally.
+    queries = generate_query_variants(query_rewritten, issue_for_retrieval, company)
+    print(f"[agent] Query variants: {len(queries)}")
+
+    # ── STEP 5: Multi-query hybrid retrieval ─────────────────────────────────
+    # Each variant hits Qdrant independently; results are merged by chunk_id
+    # deduplication before the cross-encoder re-ranks the combined pool.
     t0 = time.time()
-    chunks = retriever.retrieve(
-        query   = query_rewritten,
+    chunks = retriever.multi_retrieve(
+        queries = queries,
         company = company,
         client  = client,
     )

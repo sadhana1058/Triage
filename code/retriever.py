@@ -482,6 +482,123 @@ def build_query_embed_text(query: str, company: str) -> str:
     return query
 
 
+def multi_retrieve(
+    queries:  list[str],
+    company:  str,
+    client:   QdrantClient,
+    top_k:    int = TOP_K,
+) -> list[dict]:
+    """
+    Multi-query retrieval: run each query variant through Qdrant, merge the
+    candidate pools by chunk_id deduplication, then cross-encode the merged
+    pool once and return ranked results.
+
+    WHY:
+        A single query rewrite can miss relevant chunks when the ticket uses
+        different vocabulary than the documentation. Running 2-3 rephrased
+        variants and merging their candidates before the cross-encoder
+        significantly improves recall without changing the reranking logic.
+
+    DEDUP STRATEGY:
+        Keep the first occurrence of each chunk_id (RRF score from the
+        query that retrieved it first). The cross-encoder will re-score
+        all of them on the primary query, so order doesn't matter here.
+
+    Args:
+        queries:  list of query strings (primary + variants), max ~5
+        company:  used for domain filter
+        client:   QdrantClient instance
+        top_k:    candidates to pull per query from Qdrant
+
+    Returns:
+        Same format as retrieve() — list of chunk dicts sorted by cross_score.
+    """
+    t0 = time.time()
+
+    bm25, vocab = get_bm25_state()
+    domain      = COMPANY_TO_DOMAIN.get(company)
+
+    qdrant_filter = None
+    if domain:
+        qdrant_filter = Filter(
+            must=[FieldCondition(key="domain", match=MatchValue(value=domain))]
+        )
+
+    # Collect raw Qdrant results from all query variants
+    seen_chunk_ids: set[str] = set()
+    merged_results = []
+
+    for q in queries:
+        embed_text = build_query_embed_text(q, company)
+        dense_qvec = get_biencoder().encode(embed_text).tolist()
+        sparse_qvec = text_to_sparse(q, vocab, bm25)
+
+        points = client.query_points(
+            collection_name = COLLECTION_NAME,
+            prefetch        = [
+                Prefetch(
+                    query           = dense_qvec,
+                    using           = DENSE_VEC,
+                    filter          = qdrant_filter,
+                    limit           = top_k,
+                    score_threshold = BI_SCORE_FLOOR,
+                ),
+                Prefetch(
+                    query  = sparse_qvec,
+                    using  = SPARSE_VEC,
+                    filter = qdrant_filter,
+                    limit  = top_k,
+                ),
+            ],
+            query        = FusionQuery(fusion=Fusion.RRF),
+            limit        = top_k,
+            with_payload = True,
+        ).points
+
+        for p in points:
+            cid = p.payload.get("chunk_id", str(p.id))
+            if cid not in seen_chunk_ids:
+                seen_chunk_ids.add(cid)
+                merged_results.append(p)
+
+    if not merged_results:
+        print(f"[retriever] ⚠ Zero results across {len(queries)} queries")
+        return []
+
+    # Cross-encode the merged pool using the primary query
+    primary_query = queries[0]
+    pairs        = [(primary_query, r.payload["text"]) for r in merged_results]
+    cross_scores = get_crossencoder().predict(pairs).tolist()
+
+    combined = sorted(
+        [
+            {
+                "text":        r.payload.get("text", ""),
+                "title":       r.payload.get("title", ""),
+                "section":     r.payload.get("section", ""),
+                "breadcrumbs": r.payload.get("breadcrumbs", []),
+                "source_url":  r.payload.get("source_url", ""),
+                "description": r.payload.get("description", ""),
+                "domain":      r.payload.get("domain", ""),
+                "subdomain":   r.payload.get("subdomain", ""),
+                "last_updated":r.payload.get("last_updated", ""),
+                "source":      r.payload.get("source", ""),
+                "chunk_id":    r.payload.get("chunk_id", ""),
+                "rrf_score":   round(r.score, 6),
+                "cross_score": round(float(cs), 4),
+            }
+            for r, cs in zip(merged_results, cross_scores)
+        ],
+        key     = lambda x: x["cross_score"],
+        reverse = True,
+    )
+
+    ms  = round((time.time() - t0) * 1000)
+    top = combined[0]["cross_score"] if combined else "N/A"
+    print(f"[retriever] {len(combined)} chunks (from {len(queries)} queries) | top_cross={top} | {ms}ms")
+    return combined
+
+
 def retrieve(
     query:   str,
     company: str,

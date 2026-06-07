@@ -91,7 +91,7 @@ OVERLAP_CHARS   = 200           # tail of previous chunk prepended to next chunk
 # 5. RETRIEVAL
 # ─────────────────────────────────────────────────────────────────────────────
 
-TOP_K          = 8              # candidates pulled from Qdrant before re-ranking
+TOP_K          = 15             # candidates pulled from Qdrant before re-ranking (per query variant)
 BI_SCORE_FLOOR = 0.20           # lenient Qdrant pre-filter (bi-encoder score)
 
 
@@ -102,7 +102,8 @@ BI_SCORE_FLOOR = 0.20           # lenient Qdrant pre-filter (bi-encoder score)
 OPENAI_MODEL           = "gpt-4o-mini"
 SLEEP_BETWEEN_TICKETS  = 1      # gentle pacing — OpenAI has generous RPM limits
 MAX_RETRIES            = 1      # retry invalid output once before escalating
-TOP_CHUNKS_FOR_PROMPT  = 3      # top-N chunks sent to LLM (after cross-encoder rank)
+TOP_CHUNKS_FOR_PROMPT  = 5      # top-N chunks sent to LLM (after cross-encoder rank)
+NUM_QUERY_VARIANTS     = 3      # multi-query: number of query phrasings to generate
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,7 +112,7 @@ TOP_CHUNKS_FOR_PROMPT  = 3      # top-N chunks sent to LLM (after cross-encoder 
 
 # Minimum cross-encoder score to proceed to Gemini generation.
 # Below this → corpus doesn't cover the ticket → safer to escalate.
-CONFIDENCE_THRESHOLD = 0.55
+CONFIDENCE_THRESHOLD = 0.40
 
 # Tickets over this length are suspicious (likely injection or spam).
 MAX_TICKET_LENGTH = 5000
